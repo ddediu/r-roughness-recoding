@@ -1,0 +1,7424 @@
+## ----setup, results='hide', warning=FALSE, message=FALSE, warning=FALSE, message=FALSE----
+## Knitting options:
+knitr::opts_chunk$set(echo=TRUE, warning=FALSE, message=FALSE,                   # default code chunk options
+                      fig.width=11, fig.height=6, fig.align="center", comment=NA, # default figure dimensions
+                      fig.path="./figures/",                                      # save images to ./figures/
+                      dpi=72, dev="jpeg",                                         # please set dpi=300 and comment out dev="jpeg" for high resolution but very big images
+                      cache=TRUE, autodep=TRUE);                                  # cache chunks
+
+# Export just the R code:
+options(knitr.purl.inline=TRUE); # export inline R expressions as well
+knitr::knit_hooks$set(purl=knitr::hook_purl); # automaticallt export R code on knit ...
+knitr::opts_chunk$set(echo=TRUE); # ... as per https://stackoverflow.com/questions/71183578/how-to-extract-all-code-from-an-rmarkdown-rmd-file
+
+## Load needed packages:
+
+library(knitr);
+library(dplyr);
+library(magrittr);
+library(tibble);
+library(readr);
+library(utf8);
+library(ggalluvial);
+library(parallel);
+library(brms);
+library(bayestestR);
+library(ggplot2);
+library(gridExtra);
+library(ggpubr);
+library(sjPlot);
+library(lmerTest);
+#library(piecewiseSEM);
+library(stringr);
+library(ape);
+
+`%>%` <- magrittr::`%>%`;
+
+if( !dir.exists("./cached") ) dir.create("./cached", showWarnings=FALSE, recursive=TRUE);
+
+# Should we try to reduce the size of the resulting HTML document?
+small_HTML <- FALSE;
+small_PDF <- TRUE;
+
+## For Bayesian regressions with brms (some might be different for particular models to avoid too few or too many iterations):
+brms_ncores  <- max(detectCores(all.tests=TRUE, logical=FALSE), 4, na.rm=TRUE); # try to use multiple cores, if present
+brms_ci      <- 0.89; brms_rope <- c(-0.01, 0.01); # 89% HDI and a tight ROPE around 0.0 [-0.01, 0.01]
+brms_bayes_factors <- FALSE; # don't do BFs
+
+options(future.globals.maxSize=2*1024^3); # allow 2Gb global exports for futures
+
+# Figure and Table caption adapted from https://stackoverflow.com/questions/37116632/rmarkdown-html-number-figures: 
+outputFormat = opts_knit$get("rmarkdown.pandoc.to"); # determine the output format of the document
+if( is.null(outputFormat) ) outputFormat = ""; # probably not run within knittr
+capTabNo = 1; capFigNo = 1; # figure and table caption numbering, for HTML do it manually
+#Function to add the Table Number
+capTab = function(x){
+  if(outputFormat == 'html'){
+    x = paste0("***Table ",capTabNo,".*** _",x,"_")
+    capTabNo <<- capTabNo + 1
+  }; x
+}
+#Function to add the Figure Number
+capFig = function(x){
+  if(outputFormat == 'html'){
+    x = paste0("***Figure ",capFigNo,".*** _",x,"_")
+    capFigNo <<- capFigNo + 1
+  }; x
+}
+
+source("./rough_helper.r"); # R code from @winter_trilled_2022
+
+
+# Prepare maps for plotting:
+world_map <- ggplot2::map_data("world") %>% 
+  dplyr::filter(region != "Antarctica");
+
+basic4map <- ggplot2::ggplot() + 
+  ggplot2::coord_fixed() +
+  ggplot2::xlab("") +
+  ggplot2::ylab("");
+
+base_world <- basic4map +
+  ggplot2::geom_polygon(data=world_map,
+                        ggplot2::aes(x=long,
+                                     y=lat,
+                                     group=group), 
+                        colour="gray",
+                        fill="gray") +
+  ggplot2::theme(panel.background = ggplot2::element_rect(
+    size = 0.5,
+    linetype = "solid"),
+    panel.grid.major = ggplot2::element_line(
+      size = 0.5,
+      linetype = 'solid',
+      colour = "gray90"), 
+    panel.grid.minor = ggplot2::element_line(
+      size = 0.25,
+      linetype = 'solid',
+      colour = "gray90")) ;
+
+rm(basic4map); # free up space
+  
+# colors for plotting:
+r_col <- "#440154FF";
+other_col <- "#FDE725FF";
+
+world <- rnaturalearth::ne_countries(scale = "medium", returnclass = "sf");
+
+theme_rough <- 
+ggplot2::theme_classic() + 
+  ggplot2::theme(legend.position = "none",
+        legend.key.height = ggplot2::unit(2,"line"),
+        legend.title = ggplot2::element_blank(),
+        legend.text = ggplot2::element_text(size = 12),
+        legend.background = ggplot2::element_rect(fill = "transparent"),
+        strip.background = ggplot2::element_blank(),
+        strip.text = ggplot2::element_text(size = 12, face = "bold"),
+        panel.spacing = ggplot2::unit(2, "lines"),
+        panel.border = ggplot2::element_blank(),
+        plot.background = ggplot2::element_rect(fill = "transparent", colour = NA),
+        panel.background = ggplot2::element_rect(fill = "transparent"),
+        strip.text.y =ggplot2:: element_text(size = 12, hjust = 0),
+        axis.text.x = ggplot2::element_text(size = 12, colour="black", face="bold"),
+        axis.text.y = ggplot2::element_text(size = 12, colour="black"),
+        axis.line = ggplot2::element_blank(),
+        axis.ticks.x = ggplot2::element_blank(),
+        axis.title = ggplot2::element_text(size = 12, face = "bold"),
+        plot.title = ggplot2::element_text(size = 14, face = "bold"),
+        plot.margin = ggplot2::unit(c(0.4,0.4,0.4,0.4),"cm"));
+
+
+
+# Verbal interpretation of Bayes factors (BF):
+BF_interpretation <- function(BF, model1_name="m1", model2_name="m2")
+{
+  if( BF > 100 )   return (paste0("extreme evidence for ",model1_name," against ",model2_name, " (BF=",sprintf("%.3g",BF),")"));
+  if( BF > 30 )    return (paste0("very strong evidence for ",model1_name," against ",model2_name, " (BF=",sprintf("%.3g",BF),")"));
+  if( BF > 10 )    return (paste0("strong evidence for ",model1_name," against ",model2_name, " (BF=",sprintf("%.3g",BF),")"));
+  if( BF > 3 )     return (paste0("moderate evidence for ",model1_name," against ",model2_name, " (BF=",sprintf("%.3g",BF),")"));
+  if( BF > 1 )     return (paste0("anecdotal evidence for ",model1_name," against ",model2_name, " (BF=",sprintf("%.3g",BF),")"));
+  if( BF == 1 )    return (paste0("no evidence for ",model1_name," nor ",model2_name, " (BF=",sprintf("%.3g",BF),")"));
+  if( BF > 0.33 )  return (paste0("anecdotal evidence for ",model2_name," against ",model1_name, " (BF=",sprintf("%.3g",BF),")"));
+  if( BF > 0.10 )  return (paste0("moderate evidence for ",model2_name," against ",model1_name, " (BF=",sprintf("%.3g",BF),")"));
+  if( BF > 0.033 ) return (paste0("strong evidence for ",model2_name," against ",model1_name, " (BF=",sprintf("%.3g",BF),")"));
+  if( BF > 0.010 ) return (paste0("very strong evidence for ",model2_name," against ",model1_name, " (BF=",sprintf("%.3g",BF),")"));
+  return (paste0("extreme evidence for ",model2_name," against ",model1_name, " (BF=",sprintf("%.3g",BF),")"));
+}
+
+# Here I hack brms' kfold code to make it run in parallel using good old mclapply instead of futures
+# this avoid random crashes which seem to be due to future, but works only on *NIX (which, for me here, is not an issue)
+# Adapted the code from https://github.com/paul-buerkner/brms/blob/master/R/loo.R and https://github.com/paul-buerkner/brms/blob/master/R/kfold.R
+if( Sys.info()['sysname'] == "Windows" )
+{
+  # In Windows, fall back to the stadard implementation in brms:
+  add_criterion_kfold_parallel <- function(model, K=10, chains=1)
+  {
+    return (add_criterion(model, criterion="kfold", K=K, chains=chains));
+  }
+} else
+{
+  # On anything else, try to use maclapply:
+  add_criterion_kfold_parallel <- function(model, K=10, chains=1)
+  {
+    model <- restructure(model);
+  
+    mf <- model.frame(model); 
+    attributes(mf)[c("terms", "brmsframe")] <- NULL;
+    N <- nrow(mf);
+    
+    if( K > N ) return (model); # does not work in this case...
+    
+    fold_type <- "random"; folds <- loo::kfold_split_random(K, N);
+    Ksub <- seq_len(K);
+  
+    kfold_results <- mclapply(Ksub, function(k) 
+    {
+      omitted <- predicted <- which(folds == k);
+      mf_omitted <- mf[-omitted, , drop=FALSE];
+      
+      if( exists("subset_data2", envir=asNamespace("brms")) )
+      {
+        # Newer versions of brms:
+        model_updated <- base::suppressWarnings(update(model, newdata=mf_omitted, data2=brms:::subset_data2(model$data2, -omitted), refresh=0, chains=chains));
+        
+        lppds <- log_lik(model_updated, newdata=mf[predicted, , drop=FALSE], newdata2=brms:::subset_data2(model$data2, predicted), 
+                         allow_new_levels=TRUE, resp=NULL, combine=TRUE, chains=chains);
+      } else if( exists("subset_autocor", envir=asNamespace("brms")) )
+      {
+        # Older versions of brms:
+        model2 <- brms:::subset_autocor(model, -omitted, incl_car=TRUE);
+        model_updated <- base::suppressWarnings(update(model2, newdata=mf_omitted, refresh=0, chains=chains));
+        
+        lppds <- log_lik(model_updated, newdata=mf[predicted, , drop=FALSE], allow_new_levels=TRUE, resp=NULL, combine=TRUE, chains=chains);
+      } else
+      {
+        stop("Unknown version of brms!");
+      }
+  
+      return (list("obs_order"=predicted, "lppds"=lppds));
+    }, mc.cores=ifelse(exists("brms_ncores"), brms_ncores, detectCores()));
+    
+    # Put them back in the form expected by the the following unmodifed code:
+    obs_order <- lapply(kfold_results, function(x) x$obs_order);
+    lppds     <- lapply(kfold_results, function(x) x$lppds);
+    
+    elpds <- brms:::ulapply(lppds, function(x) apply(x, 2, brms:::log_mean_exp))
+    # make sure elpds are put back in the right order
+    elpds <- elpds[order(unlist(obs_order))]
+    elpd_kfold <- sum(elpds)
+    se_elpd_kfold <- sqrt(length(elpds) * var(elpds))
+    rnames <- c("elpd_kfold", "p_kfold", "kfoldic")
+    cnames <- c("Estimate", "SE")
+    estimates <- matrix(nrow = 3, ncol = 2, dimnames = list(rnames, cnames))
+    estimates[1, ] <- c(elpd_kfold, se_elpd_kfold)
+    estimates[3, ] <- c(-2 * elpd_kfold, 2 * se_elpd_kfold)
+    out <- brms:::nlist(estimates, pointwise = cbind(elpd_kfold = elpds))
+    atts <- brms:::nlist(K, Ksub, NULL, folds, fold_type)
+    attributes(out)[names(atts)] <- atts
+    out <- structure(out, class = c("kfold", "loo"))
+    
+    attr(out, "yhash") <- brms:::hash_response(model, newdata=NULL, resp=NULL);
+    attr(out, "model_name") <- "";
+    
+    model$criteria$kfold <- out;
+    model;
+  }
+}
+
+# Bayesian fit indices for a given model:
+brms_fit_indices <- function(model, indices=c("bayes_R2", "loo", "waic", "kfold"), K=10, verbose=TRUE, do.parallel=TRUE, moment_match=NULL, reloo=NULL)
+{
+  if( "bayes_R2" %in% indices )
+  {
+    if( verbose) cat("R^2...\n");
+    #attr(model, "R2") <- bayes_R2(model); 
+    model <- add_criterion(model, "bayes_R2"); 
+  } else
+  {
+    # Remove the criterion (if already there):
+    if( !is.null(model$criteria) && "bayes_R2" %in% names(model$criteria) ) model$criteria[[ which(names(model$criteria) == "bayes_R2") ]] <- NULL;
+  }
+  
+  if( "loo" %in% indices )
+  {
+    if( verbose) cat("LOO...\n");
+    if( is.null(moment_match) )
+    {
+      if( is.null(reloo) )
+      {
+        model <- add_criterion(model, "loo"); 
+      } else
+      {
+        model <- add_criterion(model, "loo", reloo=reloo); 
+      }
+    } else
+    {
+      if( is.null(reloo) )
+      {
+        model <- add_criterion(model, "loo", moment_match=moment_match); 
+      } else
+      {
+        model <- add_criterion(model, "loo", moment_match=moment_match, reloo=reloo); 
+      }
+    }
+  } else
+  {
+    # Remove the criterion (if already there):
+    if( !is.null(model$criteria) && "loo" %in% names(model$criteria) ) model$criteria[[ which(names(model$criteria) == "loo") ]] <- NULL;
+  }
+  
+  if( "waic" %in% indices )
+  {
+    if( verbose) cat("WAIC...\n");
+    model <- add_criterion(model, "waic"); 
+  } else
+  {
+    # Remove the criterion (if already there):
+    if( !is.null(model$criteria) && "waic" %in% names(model$criteria) ) model$criteria[[ which(names(model$criteria) == "waic") ]] <- NULL;
+  }
+  
+  if( "kfold" %in% indices )
+  {
+    if( verbose) cat(paste0("KFOLD (K=",K,")...\n"));
+    model1 <- NULL;
+    if( !do.parallel )
+    {
+      try(model1 <- add_criterion(model, "kfold", K=K, chains=1), silent=TRUE);
+    } else
+    {
+      try(model1 <- add_criterion_kfold_parallel(model, K=K, chains=1), silent=TRUE);
+    }
+    if( !is.null(model1) )
+    {
+      model <- model1;
+    } else
+    {
+      # Remove the criterion (if already there):
+      if( !is.null(model$criteria) && "kfold" %in% names(model$criteria) ) model$criteria[[ which(names(model$criteria) == "kfold") ]] <- NULL;
+    }
+  } else
+  {
+    # Remove the criterion (if already there):
+    if( !is.null(model$criteria) && "kfold" %in% names(model$criteria) ) model$criteria[[ which(names(model$criteria) == "kfold") ]] <- NULL;
+  }
+
+  gc();
+  
+  return (model);
+}
+
+# Bayesian model comparison:
+#model1 <- b_uvbm__blue
+#model2 <- b_popsize__blue
+brms_compare_models <- function(model1, model2, name1=NA, name2=NA, bayes_factor=TRUE, print_results=TRUE)
+{
+  if( !is.null(model1$criteria) && "bayes_R2" %in% names(model1$criteria) && !is.null(model1$criteria$bayes_R2) &&
+      !is.null(model2$criteria) && "bayes_R2" %in% names(model2$criteria) && !is.null(model2$criteria$bayes_R2) )
+  {
+    R2_1_2 <- (mean(model1$criteria$bayes_R2) - mean(model2$criteria$bayes_R2));
+  } else
+  {
+    R2_1_2 <- NA;
+  }
+  
+  if( bayes_factor )
+  {
+    invisible(capture.output(bf_1_2 <- brms::bayes_factor(model1, model2)$bf));
+    bf_interpret_1_2 <- BF_interpretation(bf_1_2, ifelse(!is.na(name1), name1, "model1"), ifelse(!is.na(name2), name2, "model2")); 
+  }
+  else
+  {
+    bf_1_2 <- NULL; bf_interpret_1_2 <- NA;
+  }
+  
+  if( !is.null(model1$criteria) && "loo" %in% names(model1$criteria) && !is.null(model1$criteria$loo) &&
+      !is.null(model2$criteria) && "loo" %in% names(model2$criteria) && !is.null(model2$criteria$loo) )
+  {
+    loo_1_2 <- loo_compare(model1, model2, criterion="loo", model_names=c(ifelse(!is.na(name1), name1, "model1"), ifelse(!is.na(name2), name2, "model2")));
+  } else
+  {
+    loo_1_2 <- NA;
+  }
+  
+  if( !is.null(model1$criteria) && "waic" %in% names(model1$criteria) && !is.null(model1$criteria$waic) &&
+      !is.null(model2$criteria) && "waic" %in% names(model2$criteria) && !is.null(model2$criteria$waic) )
+  {
+    waic_1_2 <- loo_compare(model1, model2, criterion="waic", model_names=c(ifelse(!is.na(name1), name1, "model1"), ifelse(!is.na(name2), name2, "model2")));
+    mw_1_2 <- model_weights(model1, model2, weights="waic", model_names=c(ifelse(!is.na(name1), name1, "model1"), ifelse(!is.na(name2), name2, "model2")));
+  } else
+  {
+    waic_1_2 <- NA; 
+    mw_1_2 <- NA;
+  }
+  
+  if( !is.null(model1$criteria) && "kfold" %in% names(model1$criteria) && !is.null(model1$criteria$kfold) &&
+      !is.null(model2$criteria) && "kfold" %in% names(model2$criteria) && !is.null(model2$criteria$kfold) )
+  {
+    kfold_1_2 <- loo_compare(model1, model2, criterion="kfold", model_names=c(ifelse(!is.na(name1), name1, "model1"), ifelse(!is.na(name2), name2, "model2")));
+  } else
+  {
+    kfold_1_2 <- NA;
+  }
+  
+  if( print_results )
+  {
+    cat(paste0("\nComparing models '",ifelse(!is.na(name1), name1, "model1"),"' and '",ifelse(!is.na(name2), name2, "model2"),"':\n\n"));
+    cat(paste0("\ndelta R^2 = ",sprintf("%.1f%%",100*R2_1_2),"\n\n"));
+    cat(bf_interpret_1_2,"\n\n");
+    cat("\nLOO:\n"); print(loo_1_2);
+    cat("\nWAIC:\n"); print(waic_1_2);
+    cat("\nKFOLD:\n"); print(kfold_1_2);
+    cat("\nModel weights (WAIC):\n"); print(mw_1_2);
+    cat("\n");
+  }
+  
+  gc();
+  
+  return (list("R2"=R2_1_2, "BF"=bf_1_2, "BF_interpretation"=bf_interpret_1_2, "LOO"=loo_1_2, "WAIC"=waic_1_2, "KFOLD"=kfold_1_2, "model_weights_WAIC"=mw_1_2));
+}
+
+# print model comparisons
+.print.model.comparison <- function(a=NULL, a.names=NULL, b=NULL) # a is the anova and b is the Bayesian comparison (only one can be non-NULL), a.names are the mappings between the inner and user-friendly model names
+{
+  # ANOVA:
+  if( !is.null(a) )
+  {
+    a <- as.data.frame(a);
+    if( !is.null(a.names) )
+    {
+      if( length(a.names) != nrow(a) || !all(names(a.names) %in% rownames(a)) )
+      {
+        stop("a.names do not correspond the anova model names!");
+        return (NULL);
+      }
+      rownames(a) <- a.names[rownames(a)];
+    }
+    i <- which.min(a$AIC);
+    s.a <- sprintf("%s %s %s: ΔAIC=%.1f, ΔBIC=%.1f", 
+                   rownames(a)[i], 
+                   ifelse((!is.na(a[2,"Pr(>Chisq)"]) && a[2,"Pr(>Chisq)"] <0.05) || (abs(a$AIC[1] - a$AIC[2]) > 3), ">", "≈"),
+                   rownames(a)[3-i],
+                   abs(a$AIC[1] - a$AIC[2]), 
+                   abs(a$BIC[1] - a$BIC[2]));
+    if( !is.na(a[2,"Pr(>Chisq)"]) )
+    {
+      s.a <- paste0(s.a,
+                    sprintf(", *p*=%s", scinot(a[2,"Pr(>Chisq)"])));
+    }
+    
+    # return value:
+    return (s.a);
+  }
+  
+  # Bayesian comparison:
+  if( !is.null(b) )
+  {
+    s.b <- c();
+    if(!is.null(b$BF) && !is.na(b$BF_interpretation)) s.b <- c(s.b, sprintf("BF: %s", 
+                                                                            b$BF_interpretation));
+    if(!is.null(b$LOO) && !all(is.na(b$LOO)) && 
+       nrow(b$LOO) >= 2 && ncol(b$LOO) >= 2) s.b <- c(s.b, sprintf("ΔLOO(%s %s %s)=%.1f (%.1f)", rownames(b$LOO)[1],
+                                                                   ifelse(abs(b$LOO[1,1]-b$LOO[2,1]) < 4 || abs(b$LOO[1,1]-b$LOO[2,1]) < b$LOO[2,2], "≈", ifelse(abs(b$LOO[1,1]-b$LOO[2,1]) < 2*b$LOO[2,2], ">", ">>")),
+                                                                   rownames(b$LOO)[2], 
+                                                                   abs(b$LOO[1,1]-b$LOO[2,1]), b$LOO[2,2]));
+    if(!is.null(b$WAIC) && !all(is.na(b$WAIC)) && 
+       nrow(b$WAIC) >= 2 && ncol(b$WAIC) >= 2) s.b <- c(s.b, sprintf("ΔWAIC(%s %s %s)=%.1f (%.1f)", rownames(b$WAIC)[1], 
+                                                                     ifelse(abs(b$WAIC[1,1]-b$WAIC[2,1]) < 4 || abs(b$WAIC[1,1]-b$WAIC[2,1]) < b$WAIC[2,2], "≈", ifelse(abs(b$WAIC[1,1]-b$WAIC[2,1]) < 2*b$WAIC[2,2], ">", ">>")), 
+                                                                     rownames(b$WAIC)[2], 
+                                                                     abs(b$WAIC[1,1]-b$WAIC[2,1]), b$WAIC[2,2]));
+    if(!is.null(b$KFOLD) && !all(is.na(b$KFOLD)) && 
+       nrow(b$KFOLD) >= 2 && ncol(b$KFOLD) >= 2) s.b <- c(s.b, sprintf("ΔKFOLD(%s %s %s)=%.1f (%.1f)", rownames(b$KFOLD)[1], 
+                                                                       ifelse(abs(b$KFOLD[1,1]-b$KFOLD[2,1]) < 4 || abs(b$KFOLD[1,1]-b$KFOLD[2,1]) < b$KFOLD[2,2], "≈", ifelse(abs(b$KFOLD[1,1]-b$KFOLD[2,1]) < 2*b$KFOLD[2,2], ">", ">>")), 
+                                                                       rownames(b$KFOLD)[2], 
+                                                                       abs(b$KFOLD[1,1]-b$KFOLD[2,1]), b$KFOLD[2,2]));
+    # return value:
+    return (paste0(s.b, collapse=", "));
+    
+
+    # s.b <- sprintf("BF: %s, ΔLOO(%s %s %s)=%.1f (%.1f), ΔWAIC(%s %s %s)=%.1f (%.1f), ΔKFOLD(%s %s %s)=%.1f (%.1f)",
+    #                # BF:
+    #                b$BF_interpretation, 
+    #                # LOO:
+    #                rownames(b$LOO)[1],
+    #                ifelse(abs(b$LOO[1,1]-b$LOO[2,1]) < 4 || abs(b$LOO[1,1]-b$LOO[2,1]) < b$LOO[2,2], "≈", ifelse(abs(b$LOO[1,1]-b$LOO[2,1]) < 2*b$LOO[2,2], ">", ">>")),
+    #                rownames(b$LOO)[2], 
+    #                abs(b$LOO[1,1]-b$LOO[2,1]), b$LOO[2,2], 
+    #                # WAIC:
+    #                rownames(b$WAIC)[1], 
+    #                ifelse(abs(b$WAIC[1,1]-b$WAIC[2,1]) < 4 || abs(b$WAIC[1,1]-b$WAIC[2,1]) < b$WAIC[2,2], "≈", ifelse(abs(b$WAIC[1,1]-b$WAIC[2,1]) < 2*b$WAIC[2,2], ">", ">>")), 
+    #                rownames(b$WAIC)[2], 
+    #                abs(b$WAIC[1,1]-b$WAIC[2,1]), b$WAIC[2,2],
+    #                # KFOLD:
+    #                rownames(b$KFOLD)[1], 
+    #                ifelse(abs(b$KFOLD[1,1]-b$KFOLD[2,1]) < 4 || abs(b$KFOLD[1,1]-b$KFOLD[2,1]) < b$KFOLD[2,2], "≈", ifelse(abs(b$KFOLD[1,1]-b$KFOLD[2,1]) < 2*b$KFOLD[2,2], ">", ">>")), 
+    #                rownames(b$KFOLD)[2], 
+    #                abs(b$KFOLD[1,1]-b$KFOLD[2,1]), b$KFOLD[2,2]);
+    # 
+    # # return value:
+    # return (s.b);
+  }
+}
+
+## -----------------------------------------------------------------------------
+# Check if IE_recoding_adapted.Rmd was already ran or not:
+if( !file.exists("./data/rough_r_data_IE.csv") )
+{
+  stop(paste0("Please run first the ./IE_recoding_adapted.Rmd script to generate the ./data/rough_r_data_IE.csv file!"));
+}
+
+## ----results='asis'-----------------------------------------------------------
+if( small_HTML ) cat("***N.B.*: please note that, in order to reduce the size of the resulting `HTML` document, some of the plots were not included here, being replced with a generic placeholder; please consult the full report in the [GitHub repository](https://github.com/ddediu/r-roughness-recoding).**");
+if( small_PDF ) cat("***N.B.*: please note that, first, as this document's intended format is `HTML`, its conversion to `PDF` might result in some typographic issues, and, second, that in order to reduce its size the quality of the images and plots was degraded (but is still decent); please consult the full report in the [GitHub repository https://github.com/ddediu/r-roughness-recoding](https://github.com/ddediu/r-roughness-recoding).**");
+
+## ----load the revised data, results='hide', warning=FALSE, message=FALSE------
+# Excluding our recoding of the IE languages, as in the original:
+rough_r_data    <- read.csv("./data/rough_r_data.csv"); # Load the recoding excluding the IE languages (the original)
+
+rough_r_data %>% 
+  dplyr::select(Language,revision,Trill) %>% 
+  dplyr::filter(!is.na(revision)) %>% 
+  dplyr::group_by(Trill) %>% 
+  dplyr::distinct() %>% dplyr::select(revision) %>% 
+  table() %>% as.data.frame() -> table_changes;
+
+# Fix family and branch names:
+rough_r_data$Family[ rough_r_data$Family == "Cams��" ] <- "Camsá";
+rough_r_data$Family[ rough_r_data$Family == "Tuc��noan" ] <- "Tucanoan";
+rough_r_data$Family[ rough_r_data$Family == "Choc�_" ] <- "Chocoan";
+rough_r_data$Family[ rough_r_data$Family == "Hot�_" ] <- "Hoti";
+rough_r_data$Family[ rough_r_data$Family == "Cof��n" ] <- "Cofán";
+rough_r_data$Family[ rough_r_data$Family == "Moset��n" ] <- "Mosetén";
+rough_r_data$Family[ rough_r_data$Family == "Truma�_" ] <- "Trumai";
+rough_r_data$Family[ rough_r_data$Family == "Atacame��o" ] <- "Atacameño";
+rough_r_data$Family[ rough_r_data$Family == "East Bird���s Head" ] <- "East Bird's Head";
+rough_r_data$Branch[ rough_r_data$Branch == "Tupi-Guaran�_" ] <- "Tupi-Guarani";
+rough_r_data$Branch[ rough_r_data$Branch == "Karaj��" ] <- "Karajá";
+rough_r_data$Branch[ rough_r_data$Branch == "South Bird���s Head" ] <- "South Bird's Head";
+
+
+# Fix the UTF8 issues in some of the forms:
+rough_r_data$Form_norm <- utf8_normalize(rough_r_data$Form, map_case=TRUE, map_compat=TRUE, map_quote=TRUE, remove_ignorable=TRUE);
+length(unique(rough_r_data$Form)) - length(unique(rough_r_data$Form_norm)); setdiff(unique(rough_r_data$Form), unique(rough_r_data$Form_norm)) # 3 duplicated, 189 recoded 
+rough_r_data %>% group_by(Form_norm) %>% summarise(n_Form=length(unique(Form)), n_Form_norm=length(unique(Form_norm))) %>% filter(n_Form != n_Form_norm); # namely hladký, slät and áspero
+
+
+# Fix differing geographic coordinates for the same language (thanks to Matías Guzmán Naranjo):
+rough_r_data$Latitude_fixed <- rough_r_data$Latitude; rough_r_data$Longitude_fixed <- rough_r_data$Longitude;
+lgs_unique_coords <- unique(rough_r_data[,c("Language", "ISO_code", "Latitude_fixed", "Longitude_fixed")]); lgs_mult_coords <- table(lgs_unique_coords$Language); lgs_mult_coords <- lgs_mult_coords[ lgs_mult_coords > 1 ]; names(lgs_mult_coords);
+lgs_unique_coords <- lgs_unique_coords[lgs_unique_coords$Language %in% names(lgs_mult_coords),]; lgs_unique_coords[ order(lgs_unique_coords$Language), ]; 
+unique(rough_r_data[ rough_r_data$Language %in% names(lgs_mult_coords), c("Language", "Dataset", "Latitude_fixed", "Longitude_fixed")]) %>% arrange(Language, Dataset);
+# so, we have two types of issues: 
+# 1. CLICS vs Google -> we'll use CLICS:
+lgs_CLICS_Google <- unique(rough_r_data$Language[ rough_r_data$Language %in% names(lgs_mult_coords) & rough_r_data$Dataset == "Google" ]);
+for(lg in lgs_CLICS_Google)
+{
+  lg_CLICS_coords <- unique(rough_r_data[ rough_r_data$Language == lg & rough_r_data$Dataset == "CLICS", c("Latitude_fixed", "Longitude_fixed") ]);
+  if( nrow(lg_CLICS_coords) != 1 ) stop("There should be only 1 CLICS entry for the coordinates!");
+  rough_r_data[ rough_r_data$Language == lg & rough_r_data$Dataset == "Google", c("Latitude_fixed", "Longitude_fixed") ] <- lg_CLICS_coords;
+}
+# 2. two different entries from CLICS (or Chirila) -> if the differences are small (less than 1 degree) we'll simply use the average, but if one if large:
+lgs_manual_intervention <- c();
+for(lg in setdiff(names(lgs_mult_coords), lgs_CLICS_Google))
+{
+  lg_coords <- unique(rough_r_data[ rough_r_data$Language == lg, c("Latitude_fixed", "Longitude_fixed") ]);
+  if( abs(range(lg_coords$Latitude_fixed)[1] - range(lg_coords$Latitude_fixed)[2]) <= 1 && abs(range(lg_coords$Longitude_fixed)[1] - range(lg_coords$Longitude_fixed)[2]) <= 1)
+  {
+    rough_r_data[ rough_r_data$Language == lg, c("Latitude_fixed", "Longitude_fixed") ] <- data.frame(mean(lg_coords$Latitude_fixed), mean(lg_coords$Longitude_fixed));
+  } else
+  {
+    lgs_manual_intervention <- c(lgs_manual_intervention, lg);
+  }
+}
+unique(rough_r_data[ rough_r_data$Language %in% lgs_manual_intervention, c("Language", "Dataset", "Latitude", "Longitude")]) %>% arrange(Language, Dataset);
+# ... and we fix manually, using CLICS3 (https://clics.clld.org/languages; accessed on 14/11/2024) and making a decision based on the varieties and sources, the remaining ones:
+rough_r_data[ rough_r_data$Language == "Japanese", c("Latitude_fixed", "Longitude_fixed") ]  <- data.frame( 35.00, 135.00);
+rough_r_data[ rough_r_data$Language == "Jingpho", c("Latitude_fixed", "Longitude_fixed") ]   <- data.frame( 25.46,  97.33);
+rough_r_data[ rough_r_data$Language == "Nepali", c("Latitude_fixed", "Longitude_fixed") ]    <- data.frame( 28.00,  85.00);
+rough_r_data[ rough_r_data$Language == "Paakantyi", c("Latitude_fixed", "Longitude_fixed") ] <- data.frame(-32.70, 142.69); # this is actually from Chirila, but we used the CLICS coordinates (which are very similar anyways)
+rough_r_data[ rough_r_data$Language == "Thai", c("Latitude_fixed", "Longitude_fixed") ]      <- data.frame( 14.19, 100.67);
+
+
+# Kinds of changes due to our recoding:
+table_changes_2 <- table_changes %>% 
+  dplyr::mutate(Trill = ifelse(Trill=="yes","Trill","Other"),
+                revision = dplyr::case_when(revision == "ERROR" ~ "Error",
+                                            revision == "OUT" ~ "Contrast",
+                                            revision == "other" ~ "OTHER",
+                                            revision == "trilled" ~ "TRILL",
+                                            revision == "NA_" ~ "NA"),
+                revision = ifelse(is.na(revision),"NA",revision),
+                Data = ifelse(revision %in% c("TRILL","OTHER"),"Included","Excluded"));
+table_changes_2$revision <- factor(table_changes_2$revision,levels = c("OTHER","Contrast","Error","NA","TRILL"));
+
+data_R_revision_2 <- rough_r_data %>% 
+  dplyr::select(Language,Latitude,Longitude,Latitude_fixed,Longitude_fixed,revision,Trill) %>% 
+  dplyr::mutate(revision = ifelse(revision=="trilled","TRILL",
+                                  ifelse(revision=="other","OTHER","OLD")),
+                Data = ifelse(revision%in%c("TRILL","OTHER"),"NEW","OLD")) %>% 
+  dplyr::distinct();
+data_R_revision_2$revision <- factor(data_R_revision_2$revision,levels = c("OTHER","TRILL","OLD"));
+
+
+# Load the original @winter_trilled_2022 results:
+xling <- read.csv("./data/cross_linguistic.csv") %>%
+  dplyr::filter(Meaning %in% c("rough","smooth"),
+         Family!="Indo-European"); # do not include IE
+
+# Fix family and branch names:
+xling$Family[ xling$Family == "Cams\x92\x8d" ] <- "Camsá";
+xling$Family[ xling$Family == "Tuc\x92\x8dnoan" ] <- "Tucanoan";
+xling$Family[ xling$Family == "Choc\x92_" ] <- "Chocoan";
+xling$Family[ xling$Family == "Hot\x92_" ] <- "Hoti";
+xling$Family[ xling$Family == "Cof\x92\x8dn" ] <- "Cofán";
+xling$Family[ xling$Family == "Moset\x92\xa9n" ] <- "Mosetén";
+xling$Family[ xling$Family == "Truma\x92_" ] <- "Trumai";
+xling$Family[ xling$Family == "Atacame\x92\xb1o" ] <- "Atacameño";
+xling$Family[ xling$Family == "East Bird\x8a\x97\xc8s Head" ] <- "East Bird's Head";
+xling$Branch[ xling$Branch == "Tupi-Guaran\x92_" ] <- "Tupi-Guarani";
+xling$Branch[ xling$Branch == "Karaj\x92\x8d" ] <- "Karajá";
+xling$Branch[ xling$Branch == "South Bird\x8a\x97\xc8s Head" ] <- "South Bird's Head";
+
+xling$Meaning <- paste0("‘", xling$Meaning, "’");
+xling$Meaning.f <- factor(xling$Meaning)#, levels=c("‘smooth’", "‘rough’"));
+# only Google TRS data for Basque:
+xling <- dplyr::filter(xling, !(Language=="Basque" & Dataset=="CLICS"));
+
+
+# Fix the UTF8 issues in some of the forms:
+xling$Form_norm <- utf8_normalize(xling$Form, map_case=TRUE, map_compat=TRUE, map_quote=TRUE, remove_ignorable=TRUE);
+length(unique(xling$Form)) - length(unique(xling$Form_norm)); setdiff(unique(xling$Form), unique(xling$Form_norm)) # 0 duplicates, 145 recoded
+xling %>% group_by(Form_norm) %>% summarise(n_Form=length(unique(Form)), n_Form_norm=length(unique(Form_norm))) %>% filter(n_Form != n_Form_norm); # none
+
+
+# Fix differing geographic coordinates for the same language (thanks to Matías Guzmán Naranjo):
+xling$Latitude_fixed <- xling$Latitude; xling$Longitude_fixed <- xling$Longitude;
+lgs_unique_coords <- unique(xling[,c("Language", "ISO_code", "Latitude_fixed", "Longitude_fixed")]); lgs_mult_coords <- table(lgs_unique_coords$Language); lgs_mult_coords <- lgs_mult_coords[ lgs_mult_coords > 1 ]; 
+lgs_unique_coords <- lgs_unique_coords[lgs_unique_coords$Language %in% names(lgs_mult_coords),]; lgs_unique_coords[ order(lgs_unique_coords$Language), ]; 
+unique(xling[ xling$Language %in% names(lgs_mult_coords), c("Language", "Dataset", "Latitude_fixed", "Longitude_fixed")]) %>% arrange(Language, Dataset);
+# so, we have two types of issues: 
+# 1. CLICS vs Google -> we'll use CLICS:
+lgs_CLICS_Google <- unique(xling$Language[ xling$Language %in% names(lgs_mult_coords) & xling$Dataset == "Google" ]);
+for(lg in lgs_CLICS_Google)
+{
+  lg_CLICS_coords <- unique(xling[ xling$Language == lg & xling$Dataset == "CLICS", c("Latitude_fixed", "Longitude_fixed") ]);
+  if( nrow(lg_CLICS_coords) != 1 ) stop("There should be only 1 CLICS entry for the coordinates!");
+  xling[ xling$Language == lg & xling$Dataset == "Google", c("Latitude_fixed", "Longitude_fixed") ] <- lg_CLICS_coords;
+}
+# 2. two different entries from CLICS -> if the differences are small (less than 1 degree) we'll simply use the average, but if one if large:
+lgs_manual_intervention <- c();
+for(lg in setdiff(names(lgs_mult_coords), lgs_CLICS_Google))
+{
+  lg_coords <- unique(xling[ xling$Language == lg, c("Latitude_fixed", "Longitude_fixed") ]);
+  if( abs(range(lg_coords$Latitude_fixed)[1] - range(lg_coords$Latitude_fixed)[2]) <= 1 && abs(range(lg_coords$Longitude_fixed)[1] - range(lg_coords$Longitude_fixed)[2]) <= 1)
+  {
+    xling[ xling$Language == lg, c("Latitude_fixed", "Longitude_fixed") ] <- data.frame(mean(lg_coords$Latitude_fixed), mean(lg_coords$Longitude_fixed));
+  } else
+  {
+    lgs_manual_intervention <- c(lgs_manual_intervention, lg);
+  }
+}
+unique(xling[ xling$Language %in% lgs_manual_intervention, c("Language", "Dataset", "Latitude", "Longitude")]) %>% arrange(Language, Dataset);
+# ... and we fix manually, using CLICS3 (https://clics.clld.org/languages; accessed on 14/11/2024) and making a decision based on the varieties and sources, the remaining ones:
+xling[ xling$Language == "Japanese", c("Latitude_fixed", "Longitude_fixed") ]  <- data.frame( 35.00, 135.00);
+xling[ xling$Language == "Jingpho", c("Latitude_fixed", "Longitude_fixed") ]   <- data.frame( 25.46,  97.33);
+xling[ xling$Language == "Thai", c("Latitude_fixed", "Longitude_fixed") ]      <- data.frame( 14.19, 100.67);
+
+
+# some languages happen to have more than one rough / smooth words (very small minority!)
+# reduce to single data point via majority rule:
+xling_single <- xling %>%
+  dplyr::filter(Trill=="yes") %>%
+  dplyr::group_by(Language,Meaning.f) %>%
+  dplyr::summarise(r = as.logical(round(mean(r))),
+            Longitude=Longitude[1],
+            Latitude=Latitude[1],
+            Longitude_fixed=Longitude_fixed[1],
+            Latitude_fixed=Latitude_fixed[1]) %>%
+  dplyr::ungroup();
+
+data_R_revision <- rough_r_data; # rename our recoded data 
+
+xling_revision <- data_R_revision %>%
+  dplyr::filter(Meaning %in% c("rough","smooth"),
+         Family!="Indo-European") %>% 
+  dplyr::mutate(Trill = dplyr::case_when(revision == "trilled" ~ "yes",
+                                         revision == "other" ~ "no",
+                                         revision %in% c("OUT","NA") ~ "OUT")) %>% 
+  dplyr::filter(Trill != "OUT");
+
+xling_revision$Meaning <- paste0("‘", xling_revision$Meaning, "’");
+xling_revision$Meaning.f <- factor(xling_revision$Meaning)#, levels=c("‘smooth’", "‘rough’"));
+
+# some languages happen to have more than one rough / smooth words (very small minority!)
+# reduce to single data point via majority rule:
+xling_single_revision <- xling_revision %>%
+  dplyr::filter(Trill=="yes") %>%
+  dplyr::group_by(Language,Meaning.f) %>%
+  dplyr::summarise(r = as.logical(round(mean(r))),
+            Longitude=Longitude[1],
+            Latitude=Latitude[1],
+            Longitude_fixed=Longitude_fixed[1],
+            Latitude_fixed=Latitude_fixed[1]) %>%
+  dplyr::ungroup();
+
+
+# Including our recoding of the IE languages as well:
+rough_r_data_ie <- read.csv("./data/rough_r_data_IE.csv"); # load our recoding including for the IE languages
+
+rough_r_data_ie %>% 
+  dplyr::select(Language,revision,Trill) %>% 
+  dplyr::filter(!is.na(revision)) %>% 
+  dplyr::group_by(Trill) %>% 
+  dplyr::distinct() %>% dplyr::select(revision) %>% 
+  table() %>% as.data.frame() -> table_changes_ie;
+
+# Fix family and branch names:
+rough_r_data_ie$Family[ rough_r_data_ie$Family == "Cams��" ] <- "Camsá";
+rough_r_data_ie$Family[ rough_r_data_ie$Family == "Tuc��noan" ] <- "Tucanoan";
+rough_r_data_ie$Family[ rough_r_data_ie$Family == "Choc�_" ] <- "Chocoan";
+rough_r_data_ie$Family[ rough_r_data_ie$Family == "Hot�_" ] <- "Hoti";
+rough_r_data_ie$Family[ rough_r_data_ie$Family == "Cof��n" ] <- "Cofán";
+rough_r_data_ie$Family[ rough_r_data_ie$Family == "Moset��n" ] <- "Mosetén";
+rough_r_data_ie$Family[ rough_r_data_ie$Family == "Truma�_" ] <- "Trumai";
+rough_r_data_ie$Family[ rough_r_data_ie$Family == "Atacame��o" ] <- "Atacameño";
+rough_r_data_ie$Family[ rough_r_data_ie$Family == "East Bird���s Head" ] <- "East Bird's Head";
+rough_r_data_ie$Branch[ rough_r_data_ie$Branch == "Tupi-Guaran�_" ] <- "Tupi-Guarani";
+rough_r_data_ie$Branch[ rough_r_data_ie$Branch == "Karaj��" ] <- "Karajá";
+rough_r_data_ie$Branch[ rough_r_data_ie$Branch == "South Bird���s Head" ] <- "South Bird's Head";
+
+
+# Fix the UTF8 issues in some of the forms:
+rough_r_data_ie$Form_norm <- utf8_normalize(rough_r_data_ie$Form, map_case=TRUE, map_compat=TRUE, map_quote=TRUE, remove_ignorable=TRUE);
+length(unique(rough_r_data_ie$Form)) - length(unique(rough_r_data_ie$Form_norm)); setdiff(unique(rough_r_data_ie$Form), unique(rough_r_data_ie$Form_norm)) # 3 duplicated, 189 recoded 
+rough_r_data_ie %>% group_by(Form_norm) %>% summarise(n_Form=length(unique(Form)), n_Form_norm=length(unique(Form_norm))) %>% filter(n_Form != n_Form_norm); # namely hladký, slät and áspero
+
+
+# Fix differing geographic coordinates for the same language (thanks to Matías Guzmán Naranjo):
+rough_r_data_ie$Latitude_fixed <- rough_r_data_ie$Latitude; rough_r_data_ie$Longitude_fixed <- rough_r_data_ie$Longitude;
+lgs_unique_coords <- unique(rough_r_data_ie[,c("Language", "ISO_code", "Latitude_fixed", "Longitude_fixed")]); lgs_mult_coords <- table(lgs_unique_coords$Language); lgs_mult_coords <- lgs_mult_coords[ lgs_mult_coords > 1 ]; names(lgs_mult_coords)
+lgs_unique_coords <- lgs_unique_coords[lgs_unique_coords$Language %in% names(lgs_mult_coords),]; lgs_unique_coords[ order(lgs_unique_coords$Language), ]; 
+unique(rough_r_data_ie[ rough_r_data_ie$Language %in% names(lgs_mult_coords), c("Language", "Dataset", "Latitude_fixed", "Longitude_fixed")]) %>% arrange(Language, Dataset);
+# so, we have two types of issues: 
+# 1. CLICS vs Google -> we'll use CLICS:
+lgs_CLICS_Google <- unique(rough_r_data_ie$Language[ rough_r_data_ie$Language %in% names(lgs_mult_coords) & rough_r_data_ie$Dataset == "Google" ]);
+for(lg in lgs_CLICS_Google)
+{
+  lg_CLICS_coords <- unique(rough_r_data_ie[ rough_r_data_ie$Language == lg & rough_r_data_ie$Dataset == "CLICS", c("Latitude_fixed", "Longitude_fixed") ]);
+  if( nrow(lg_CLICS_coords) != 1 ) stop("There should be only 1 CLICS entry for the coordinates!");
+  rough_r_data_ie[ rough_r_data_ie$Language == lg & rough_r_data_ie$Dataset == "Google", c("Latitude_fixed", "Longitude_fixed") ] <- lg_CLICS_coords;
+}
+# 2. two different entries from CLICS (or Chirila) -> if the differences are small (less than 1 degree) we'll simply use the average, but if one if large:
+lgs_manual_intervention <- c();
+for(lg in setdiff(names(lgs_mult_coords), lgs_CLICS_Google))
+{
+  lg_coords <- unique(rough_r_data_ie[ rough_r_data_ie$Language == lg, c("Latitude_fixed", "Longitude_fixed") ]);
+  if( abs(range(lg_coords$Latitude_fixed)[1] - range(lg_coords$Latitude_fixed)[2]) <= 1 && abs(range(lg_coords$Longitude_fixed)[1] - range(lg_coords$Longitude_fixed)[2]) <= 1)
+  {
+    rough_r_data_ie[ rough_r_data_ie$Language == lg, c("Latitude_fixed", "Longitude_fixed") ] <- data.frame(mean(lg_coords$Latitude_fixed), mean(lg_coords$Longitude_fixed));
+  } else
+  {
+    lgs_manual_intervention <- c(lgs_manual_intervention, lg);
+  }
+}
+unique(rough_r_data_ie[ rough_r_data_ie$Language %in% lgs_manual_intervention, c("Language", "Dataset", "Latitude", "Longitude")]) %>% arrange(Language, Dataset);
+# ... and we fix manually, using CLICS3 (https://clics.clld.org/languages; accessed on 14/11/2024) and making a decision based on the varieties and sources, the remaining ones:
+rough_r_data_ie[ rough_r_data_ie$Language == "Japanese", c("Latitude_fixed", "Longitude_fixed") ]  <- data.frame( 35.00, 135.00);
+rough_r_data_ie[ rough_r_data_ie$Language == "Jingpho", c("Latitude_fixed", "Longitude_fixed") ]   <- data.frame( 25.46,  97.33);
+rough_r_data_ie[ rough_r_data_ie$Language == "Nepali", c("Latitude_fixed", "Longitude_fixed") ]    <- data.frame( 28.00,  85.00);
+rough_r_data_ie[ rough_r_data_ie$Language == "Paakantyi", c("Latitude_fixed", "Longitude_fixed") ] <- data.frame(-32.70, 142.69); # this is actually from Chirila, but we used the CLICS coordinates (which are very similar anyways)
+rough_r_data_ie[ rough_r_data_ie$Language == "Thai", c("Latitude_fixed", "Longitude_fixed") ]      <- data.frame( 14.19, 100.67);
+
+# Save it back for length processing:
+write.csv(rough_r_data_ie, "./data/rough_r_data_IE_fixed.csv", quote=TRUE, row.names=FALSE);
+
+# Kinds of changes due to our recoding:
+table_changes_2_ie <- table_changes_ie %>% 
+         dplyr::mutate(Trill = ifelse(Trill=="yes","Trill","Other"),
+                       revision = dplyr::case_when(revision == "ERROR" ~ "Error",
+                                                   revision == "OUT" ~ "Contrast",
+                                                   revision == "other" ~ "OTHER",
+                                                   revision == "trilled" ~ "TRILL",
+                                                   revision == "NA_" ~ "NA"),
+                       revision = ifelse(is.na(revision),"NA",revision),
+                       Data = ifelse(revision %in% c("TRILL","OTHER"),"Included","Excluded"));
+table_changes_2_ie$revision <- factor(table_changes_2_ie$revision,levels = c("OTHER","Contrast","Error","NA","TRILL"));
+
+data_R_revision_2_ie <- rough_r_data_ie %>% 
+                        dplyr::select(Language,Latitude,Longitude,Latitude_fixed,Longitude_fixed,revision,Trill) %>% 
+                        dplyr::mutate(revision = ifelse(revision=="trilled","TRILL",
+                                                        ifelse(revision=="other","OTHER","OLD")),
+                                      Data = ifelse(revision%in%c("TRILL","OTHER"),"NEW","OLD")) %>% 
+                        dplyr::distinct();
+data_R_revision_2_ie$revision <- factor(data_R_revision_2_ie$revision,levels = c("OTHER","TRILL","OLD"));
+
+data_R_revision_ie <- rough_r_data_ie; # rename our recoded data 
+
+xling_revision_ie <- data_R_revision_ie %>%
+  dplyr::filter(Meaning %in% c("rough","smooth"),
+         Family!="Indo-European") %>% 
+  dplyr::mutate(Trill = dplyr::case_when(revision == "trilled" ~ "yes",
+                                         revision == "other" ~ "no",
+                                         revision %in% c("OUT","NA") ~ "OUT")) %>% 
+  dplyr::filter(Trill != "OUT");
+
+xling_revision_ie$Meaning <- paste0("‘", xling_revision_ie$Meaning, "’");
+xling_revision_ie$Meaning.f <- factor(xling_revision_ie$Meaning)#, levels=c("‘smooth’", "‘rough’"));
+
+# some languages happen to have more than one rough / smooth words (very small minority!)
+# reduce to single data point via majority rule:
+xling_single_revision_ie <- xling_revision_ie %>%
+  dplyr::filter(Trill=="yes") %>%
+  dplyr::group_by(Language,Meaning.f) %>%
+  dplyr::summarise(r = as.logical(round(mean(r))),
+            Longitude=Longitude[1],
+            Latitude=Latitude[1],
+            Longitude_fixed=Longitude_fixed[1],
+            Latitude_fixed=Latitude_fixed[1]) %>%
+  dplyr::ungroup();
+
+## ----fig.width=10, fig.height=7, fig.cap=capFig("The languages included in the original analysis of Winter et al., divided into those coded as 'TRILL' and those coded 'OTHER' (the Indo-European languages were marked as not included). Here we use the original latitude and longitude data.")----
+base_world + 
+  ggplot2::geom_point(data =  data_R_revision_2 %>% dplyr::filter(Data=="OLD"),
+                      ggplot2::aes(x=Longitude, y=Latitude, shape=Data), fill="red",
+             size=2, alpha=0.5)+
+  ggplot2::geom_point(data =  data_R_revision_2 %>% dplyr::filter(revision!="OLD"),
+                      ggplot2::aes(x=Longitude, y=Latitude, fill=revision, shape=Data),
+             size=2, alpha=0.5) +
+  ggplot2::scale_fill_viridis_d(name = "Coded as", labels=c("other", "trill")) +
+  ggplot2::scale_shape_manual(values=c(21, 24),
+                              name="Included?",
+                              labels=c("yes", "no")) +
+  ggplot2::ggtitle(NULL) + 
+  ggplot2::theme(legend.position="bottom") +
+  ggplot2::guides(fill=ggplot2::guide_legend(override.aes=list(shape = 21))) + 
+  NULL;
+
+## ----fig.width=10, fig.height=7, fig.cap=capFig("The languages included in the original analysis of Winter et al., divided into those coded as 'TRILL' and those coded 'OTHER' (the Indo-European languages were marked as not included). Here we use the fixed latitude and longitude data (please note that some points now appear in the same location because originally the same languages were recoded as having different coordinates in different databases).")----
+base_world + 
+  ggplot2::geom_point(data =  data_R_revision_2 %>% dplyr::filter(Data=="OLD"),
+                      ggplot2::aes(x=Longitude_fixed, y=Latitude_fixed, shape=Data), fill="red",
+             size=2, alpha=0.5)+
+  ggplot2::geom_point(data =  data_R_revision_2 %>% dplyr::filter(revision!="OLD"),
+                      ggplot2::aes(x=Longitude_fixed, y=Latitude_fixed, fill=revision, shape=Data),
+             size=2, alpha=0.5) +
+  ggplot2::scale_fill_viridis_d(name = "Coded as", labels=c("other", "trill")) +
+  ggplot2::scale_shape_manual(values=c(21, 24),
+                              name="Included?",
+                              labels=c("yes", "no")) +
+  ggplot2::ggtitle(NULL) + 
+  ggplot2::theme(legend.position="bottom") +
+  ggplot2::guides(fill=ggplot2::guide_legend(override.aes=list(shape = 21))) + 
+  NULL;
+
+## ----fig.width=10, fig.height=7, fig.cap=capFig("The languages included in the recoded dataset, divided into those coded as 'trills' and those coded 'other' (the colors are consistent with those in the previous figure). Here we use the original latitude and longitude data."), include=!small_HTML----
+d <- dplyr::filter(rough_r_data, !is.na(revision) & revision=="trilled" | revision=="other") %>% 
+     dplyr::select(Longitude,Latitude,revision) %>% dplyr::distinct(); # no doubled entries in the table
+
+base_world + 
+  ggplot2::geom_point(data =  d,
+                      ggplot2::aes(x=Longitude, y=Latitude, fill=revision), shape=21,
+             size=2, alpha=0.5) +
+  ggplot2::scale_fill_viridis_d(name = "Recoded as", labels=c("other", "trill")) +
+  ggplot2::ggtitle(NULL) + 
+  ggplot2::theme(legend.position="bottom") +
+  NULL;
+
+## ----fig.width=10, fig.height=7, fig.cap=capFig("The languages included in the recoded dataset, divided into those coded as 'trills' and those coded 'other' (the colors are consistent with those in the previous figure). Here we use the fixed latitude and longitude data (please note that some points now appear in the same location because originally the same languages were recoded as having different coordinates in different databases)."), include=!small_HTML----
+d <- dplyr::filter(rough_r_data, !is.na(revision) & revision=="trilled" | revision=="other") %>% 
+     dplyr::select(Longitude_fixed,Latitude_fixed,revision) %>% dplyr::distinct(); # no doubled entries in the table
+
+base_world + 
+  ggplot2::geom_point(data =  d,
+                      ggplot2::aes(x=Longitude_fixed, y=Latitude_fixed, fill=revision), shape=21,
+             size=2, alpha=0.5) +
+  ggplot2::scale_fill_viridis_d(name = "Recoded as", labels=c("other", "trill")) +
+  ggplot2::ggtitle(NULL) + 
+  ggplot2::theme(legend.position="bottom") +
+  NULL;
+
+## -----------------------------------------------------------------------------
+kable(sort(table(dplyr::filter(unique(dplyr::select(rough_r_data,Language,Family)),Family!="Indo-European")$Family), decreasing=TRUE)[1:10], 
+      col.names=c("Family", "# languages"), 
+      caption=capTab("The largest 10 families in our recoded dataset."));
+
+## -----------------------------------------------------------------------------
+kable(table(dplyr::filter(unique(dplyr::select(rough_r_data,Language,Area,Family)),Family!="Indo-European")$Area), 
+      col.names=c("Area", "# languages"), 
+      caption=capTab("The areas in our recoded dataset."));
+
+## ----fig.width=7, fig.height=8, fig.cap=capFig("Figure showing the effects of our recoding of the languages: the left-most side shows the original coding in Winter et al., in the middle are our recoded values, and, on the gith, the languages included/excluded from our reanalysis. We used alluvial as implemented in package `ggalluvial` [@ggalluvial2017].")----
+ggplot2::ggplot(data = table_changes_2,
+       ggplot2::aes(axis1 = Trill, axis2 = revision, axis3 = Data, y = Freq)) +
+  ggalluvial::geom_alluvium(ggplot2::aes(fill = revision)) +
+  ggalluvial::geom_stratum(fill="grey90") +
+  ggplot2::geom_text(stat = ggalluvial::StatStratum,
+            ggplot2::aes(label = tolower(ggplot2::after_stat(stratum)))) +
+  ggplot2::scale_x_discrete(limits = c("Survey", "Response"),
+                   expand = c(0.15, 0.05)) +
+  ggplot2::scale_fill_manual(values=c("OTHER"="gray50", "Error"="red", "TRILL"="yellow", "Contrast"="blue","NA"="black"), 
+                             labels=c("OTHER"="other", "Error"="error", "TRILL"="trill", "Contrast"="contrast","NA"="na"),
+                             name="Recoding") +
+  ggplot2::theme_void() +
+  NULL;
+
+## ----fig.width=2*6, fig.height=4, fig.cap=capFig("The distribution of the trilled /r/ (present, yellow, vs. not, gray) in the words 'rough' (left) and 'smooth' (right) among the languages in the original dataset of Winter et al. using their original coding (top) and our recoded dataset (bottom). The languages included differ between the four panel, as explained in the text. *N.B.* the Indo-European languages are not included. Here we use the original latitude and longitude data."), fig.show="hold", out.width="100%"----
+base_world +
+  ggplot2::geom_sf(size=0.2, col="white", fill="lightgrey") +
+  ggplot2::coord_sf(xlim = c(-180, 180), ylim = c(-60, 80), datum=NA) +
+  ggplot2::geom_point(data = xling_single, ggplot2::aes(x = Longitude, y = Latitude, fill = r, group = NA),
+             alpha = 0.65, size = 2.5,
+             col="black", pch=21, stroke=0.75,
+             position = ggplot2::position_jitter(width=2.5,height=2.5,seed=1)) +
+  ggplot2::facet_grid(~Meaning.f) +
+  ggplot2::scale_fill_viridis_d(labels=c("no /r/", "contains /r/")) +
+  ggplot2::labs(title = "The original coding") +
+  theme_rough +
+  ggplot2::theme(
+    legend.position = "none",
+    axis.title = ggplot2::element_blank(),
+    axis.text = ggplot2::element_blank(),
+    axis.line = ggplot2::element_blank(),
+    axis.ticks = ggplot2::element_blank(),
+    plot.margin = ggplot2::unit(c(0.1,0.4,-0.4,0.4),"cm"),
+    panel.spacing = ggplot2::unit(0, "lines")) +
+  NULL;
+
+base_world +
+  ggplot2::geom_sf(size=0.2, col="white", fill="lightgrey") +
+  ggplot2::coord_sf(xlim = c(-180, 180), ylim = c(-60, 80), datum=NA) +
+  ggplot2::geom_point(data = xling_single_revision, ggplot2::aes(x = Longitude, y = Latitude, fill = r, group = NA),
+             alpha = 0.65, size = 2.5,
+             col="black", pch=21, stroke=0.75,
+             position = ggplot2::position_jitter(width=2.5,height=2.5,seed=1)) +
+  ggplot2::facet_grid(~Meaning.f) +
+  ggplot2::scale_fill_viridis_d(labels=c("no /r/", "contains /r/")) +
+  ggplot2::labs(title = "The recoding") +
+  theme_rough +
+  ggplot2::theme(
+    legend.position = "bottom",
+    axis.title = ggplot2::element_blank(),
+    axis.text = ggplot2::element_blank(),
+    axis.line = ggplot2::element_blank(),
+    axis.ticks = ggplot2::element_blank(),
+    plot.margin = ggplot2::unit(c(0.1,0.4,-0.4,0.4),"cm"),
+    panel.spacing = ggplot2::unit(0, "lines")) + 
+  NULL;
+
+## ----fig.width=2*6, fig.height=4, fig.cap=capFig("The distribution of the trilled /r/ (present, yellow, vs. not, gray) in the words 'rough' (left) and 'smooth' (right) among the languages in the original dataset of Winter et al. using their original coding (top) and our recoded dataset (bottom). The languages included differ between the four panel, as explained in the text. *N.B.* the Indo-European languages are not included. Here we use the fixed latitude and longitude data (please note that some points now appear in the same location because originally the same languages were recoded as having different coordinates in different databases)."), fig.show="hold", out.width="100%"----
+base_world +
+  ggplot2::geom_sf(size=0.2, col="white", fill="lightgrey") +
+  ggplot2::coord_sf(xlim = c(-180, 180), ylim = c(-60, 80), datum=NA) +
+  ggplot2::geom_point(data = xling_single, ggplot2::aes(x = Longitude_fixed, y = Latitude_fixed, fill = r, group = NA),
+             alpha = 0.65, size = 2.5,
+             col="black", pch=21, stroke=0.75,
+             position = ggplot2::position_jitter(width=2.5,height=2.5,seed=1)) +
+  ggplot2::facet_grid(~Meaning.f) +
+  ggplot2::scale_fill_viridis_d(labels=c("no /r/", "contains /r/")) +
+  ggplot2::labs(title = "The original coding") +
+  theme_rough +
+  ggplot2::theme(
+    legend.position = "none",
+    axis.title = ggplot2::element_blank(),
+    axis.text = ggplot2::element_blank(),
+    axis.line = ggplot2::element_blank(),
+    axis.ticks = ggplot2::element_blank(),
+    plot.margin = ggplot2::unit(c(0.1,0.4,-0.4,0.4),"cm"),
+    panel.spacing = ggplot2::unit(0, "lines")) +
+  NULL;
+
+base_world +
+  ggplot2::geom_sf(size=0.2, col="white", fill="lightgrey") +
+  ggplot2::coord_sf(xlim = c(-180, 180), ylim = c(-60, 80), datum=NA) +
+  ggplot2::geom_point(data = xling_single_revision, ggplot2::aes(x = Longitude_fixed, y = Latitude_fixed, fill = r, group = NA),
+             alpha = 0.65, size = 2.5,
+             col="black", pch=21, stroke=0.75,
+             position = ggplot2::position_jitter(width=2.5,height=2.5,seed=1)) +
+  ggplot2::facet_grid(~Meaning.f) +
+  ggplot2::scale_fill_viridis_d(labels=c("no /r/", "contains /r/")) +
+  ggplot2::labs(title = "The recoding") +
+  theme_rough +
+  ggplot2::theme(
+    legend.position = "bottom",
+    axis.title = ggplot2::element_blank(),
+    axis.text = ggplot2::element_blank(),
+    axis.line = ggplot2::element_blank(),
+    axis.ticks = ggplot2::element_blank(),
+    plot.margin = ggplot2::unit(c(0.1,0.4,-0.4,0.4),"cm"),
+    panel.spacing = ggplot2::unit(0, "lines")) + 
+  NULL;
+
+## ----fig.width=10, fig.height=7, fig.cap=capFig("The languages included in the original analysis of Winter et al., divided into those coded as 'TRILL' and those coded 'OTHER', including the IE languages. Here we use the original latitude and longitude data."), include=!small_HTML----
+base_world + 
+  ggplot2::geom_point(data =  data_R_revision_2_ie %>% dplyr::filter(Data=="OLD"),
+                      ggplot2::aes(x=Longitude, y=Latitude, shape=Data), fill="red",
+             size=2, alpha=0.5)+
+  ggplot2::geom_point(data =  data_R_revision_2_ie %>% dplyr::filter(revision!="OLD"),
+                      ggplot2::aes(x=Longitude, y=Latitude, fill=revision, shape=Data),
+             size=2, alpha=0.5) +
+  ggplot2::scale_fill_viridis_d(name = "Coded as", labels=c("other", "trill")) +
+  ggplot2::scale_shape_manual(values=c(21, 24),
+                              name="Included?",
+                              labels=c("yes", "no")) +
+  ggplot2::ggtitle(NULL) + 
+  ggplot2::theme(legend.position="bottom") +
+  ggplot2::guides(fill=ggplot2::guide_legend(override.aes=list(shape = 21))) + 
+  NULL;
+
+## ----fig.width=10, fig.height=7, fig.cap=capFig("The languages included in the original analysis of Winter et al., divided into those coded as 'TRILL' and those coded 'OTHER', including the IE languages. Here we use the fixed latitude and longitude data (please note that some points now appear in the same location because originally the same languages were recoded as having different coordinates in different databases)."), include=!small_HTML----
+base_world + 
+  ggplot2::geom_point(data =  data_R_revision_2_ie %>% dplyr::filter(Data=="OLD"),
+                      ggplot2::aes(x=Longitude_fixed, y=Latitude_fixed, shape=Data), fill="red",
+             size=2, alpha=0.5)+
+  ggplot2::geom_point(data =  data_R_revision_2_ie %>% dplyr::filter(revision!="OLD"),
+                      ggplot2::aes(x=Longitude_fixed, y=Latitude_fixed, fill=revision, shape=Data),
+             size=2, alpha=0.5) +
+  ggplot2::scale_fill_viridis_d(name = "Coded as", labels=c("other", "trill")) +
+  ggplot2::scale_shape_manual(values=c(21, 24),
+                              name="Included?",
+                              labels=c("yes", "no")) +
+  ggplot2::ggtitle(NULL) + 
+  ggplot2::theme(legend.position="bottom") +
+  ggplot2::guides(fill=ggplot2::guide_legend(override.aes=list(shape = 21))) + 
+  NULL;
+
+## ----fig.width=10, fig.height=7, fig.cap=capFig("The languages included in the recoded dataset, divided into those coded as 'trills' and those coded 'other' (the colors are consistent with those in the previous figure). Here we use the original latitude and longitude data."), include=!small_HTML----
+d <- dplyr::filter(rough_r_data_ie, !is.na(revision) & revision=="trilled" | revision=="other") %>% 
+     dplyr::select(Longitude,Latitude,revision) %>% dplyr::distinct(); # no doubled entries in the table
+
+base_world + 
+  ggplot2::geom_point(data =  d,
+                      ggplot2::aes(x=Longitude, y=Latitude, fill=revision), shape=21,
+             size=2, alpha=0.5) +
+  ggplot2::scale_fill_viridis_d(name = "Recoded as", labels=c("other", "trill")) +
+  ggplot2::ggtitle(NULL) + 
+  ggplot2::theme(legend.position="bottom") +
+  NULL;
+
+## ----fig.width=10, fig.height=7, fig.cap=capFig("The languages included in the recoded dataset, divided into those coded as 'trills' and those coded 'other' (the colors are consistent with those in the previous figure). Here we use the fixed latitude and longitude data (please note that some points now appear in the same location because originally the same languages were recoded as having different coordinates in different databases)."), include=!small_HTML----
+d <- dplyr::filter(rough_r_data_ie, !is.na(revision) & revision=="trilled" | revision=="other") %>% 
+     dplyr::select(Longitude_fixed,Latitude_fixed,revision) %>% dplyr::distinct(); # no doubled entries in the table
+
+base_world + 
+  ggplot2::geom_point(data =  d,
+                      ggplot2::aes(x=Longitude_fixed, y=Latitude_fixed, fill=revision), shape=21,
+             size=2, alpha=0.5) +
+  ggplot2::scale_fill_viridis_d(name = "Recoded as", labels=c("other", "trill")) +
+  ggplot2::ggtitle(NULL) + 
+  ggplot2::theme(legend.position="bottom") +
+  NULL;
+
+## -----------------------------------------------------------------------------
+kable(sort(table(unique(dplyr::select(rough_r_data_ie,Language,Family))$Family), decreasing=TRUE)[1:10], 
+      col.names=c("Family", "# languages"), 
+      caption=capTab("The largest 10 families in our recoded dataset."));
+
+## -----------------------------------------------------------------------------
+kable(table(unique(dplyr::select(rough_r_data_ie,Language,Area,Family))$Area), 
+      col.names=c("Area", "# languages"), 
+      caption=capTab("The areas in our recoded dataset."));
+
+## ----fig.width=7, fig.height=8, fig.cap=capFig("Figure showing the effects of our recoding of the languages: the left-most side shows the original coding in Winter et al., in the middle are our recoded values, and, on the gith, the languages included/excluded from our reanalysis.")----
+ggplot2::ggplot(data = table_changes_2_ie %>% 
+                  mutate("Trill"=factor(ifelse(Trill=="Trill","trilled /r/",Trill), levels=c("trilled /r/", "Other")),
+                         "revision"=factor(ifelse(revision=="TRILL","TRILLED /r/", ifelse(revision=="NA","undecid.",as.character(revision))), levels=c("TRILLED /r/", "OTHER", "Contrast", "undecid.", "Error")),
+                         "Data"=factor(Data, levels=c("Included", "Excluded"))),
+       ggplot2::aes(axis1 = Trill, axis2 = revision, axis3 = Data, y = Freq)) +
+  ggalluvial::geom_alluvium(ggplot2::aes(fill = revision)) +
+  #ggalluvial::geom_stratum(fill="grey95") +
+  #ggalluvial::geom_stratum(aes(fill=revision)) +
+  ggalluvial::geom_stratum(fill=c("deepskyblue", "lightyellow", "red", "gray50", "gray70", "deepskyblue", "lightyellow", "white", "darkseagreen1")) +
+  ggplot2::geom_text(stat = ggalluvial::StatStratum,
+            ggplot2::aes(label = tolower(ggplot2::after_stat(stratum))), color=c("black", "black", NA, "black", "black", "black", "black", "black", "black")) +
+  ggplot2::geom_text(stat = ggalluvial::StatAlluvium, position = position_nudge(0.25),
+            ggplot2::aes(label = Freq), alpha=0.75, color="grey20") +
+  ggplot2::geom_text(stat = ggalluvial::StatAlluvium, position = position_nudge(-0.25),
+            ggplot2::aes(label = Freq), alpha=0.75, color="grey20") +
+  ggplot2::geom_rect(xmin=-1, xmax=0.83, ymin=-10, ymax=1000, fill="white") + # stupid hack but works
+  ggplot2::geom_rect(xmin=3.18, xmax=15, ymin=-10, ymax=1000, fill="white") + 
+  ggplot2::scale_x_discrete(limits = c("Survey", "Response"),
+                   expand = c(0.15, 0.05)) +
+  ggplot2::scale_fill_manual(values=c("OTHER"="blue", "Error"="red", "TRILLED /r/"="yellow", "Contrast"="gray50", "undecid."="black"), 
+                             labels=c("OTHER"="other", "Error"="error", "TRILLED /r/"="trilled /r/", "Contrast"="contrast", "undecid."="undecidable"),
+                             name="recoding:") +
+  ggplot2::theme_void() +
+  NULL;
+
+# Save for paper:
+ggplot2::ggsave("./figures/Figure1.jpg", device="jpeg", width=6, height=6, units="in", dpi=300, quality=85);
+ggplot2::ggsave("./figures/Figure1.tif", device="tiff", width=6, height=6, units="in", dpi=600, compression="lzw", type="cairo", bg="white");
+
+## ----fig.width=2*6, fig.height=4, fig.cap=capFig("The distribution of the trilled /r/ (present, yellow, vs. not, gray) in the words 'rough' (left) and 'smooth' (right) using our recoded dataset, including the IE languages. The languages included differ between the four panel, as explained in the text. Here we use the original latitude and longitude data.")----
+base_world +
+  ggplot2::geom_sf(size=0.2, col="white", fill="lightgrey") +
+  ggplot2::coord_sf(xlim = c(-180, 180), ylim = c(-60, 80), datum=NA) +
+  ggplot2::geom_point(data = xling_single_revision_ie, ggplot2::aes(x = Longitude, y = Latitude, fill = r, group = NA),
+             alpha = 0.65, size = 2.5,
+             col="black", pch=21, stroke=0.75,
+             position = ggplot2::position_jitter(width=2.5,height=2.5,seed=1)) +
+  ggplot2::facet_grid(~Meaning.f) +
+  ggplot2::scale_fill_viridis_d(labels=c("no /r/", "contains /r/")) +
+  ggplot2::labs(title = "The recoding") +
+  theme_rough +
+  ggplot2::theme(
+    legend.position = "bottom",
+    axis.title = ggplot2::element_blank(),
+    axis.text = ggplot2::element_blank(),
+    axis.line = ggplot2::element_blank(),
+    axis.ticks = ggplot2::element_blank(),
+    plot.margin = ggplot2::unit(c(0.1,0.4,-0.4,0.4),"cm"),
+    panel.spacing = ggplot2::unit(0, "lines")) + 
+  NULL;
+
+## ----fig.width=2*6, fig.height=4, fig.cap=capFig("The distribution of the trilled /r/ (present, yellow, vs. not, gray) in the words 'rough' (left) and 'smooth' (right) using our recoded dataset, including the IE languages. The languages included differ between the four panel, as explained in the text.Here we use the fixed latitude and longitude data (please note that some points now appear in the same location because originally the same languages were recoded as having different coordinates in different databases).")----
+base_world +
+  ggplot2::geom_sf(size=0.2, col="white", fill="lightgrey") +
+  ggplot2::coord_sf(xlim = c(-180, 180), ylim = c(-60, 80), datum=NA) +
+  ggplot2::geom_point(data = xling_single_revision_ie, ggplot2::aes(x = Longitude_fixed, y = Latitude_fixed, fill = r, group = NA),
+             alpha = 0.65, size = 2.5,
+             col="black", pch=21, stroke=0.75,
+             position = ggplot2::position_jitter(width=2.5,height=2.5,seed=1)) +
+  ggplot2::facet_grid(~Meaning.f) +
+  ggplot2::scale_fill_viridis_d(labels=c("no /r/", "contains /r/")) +
+  ggplot2::labs(title = "The recoding") +
+  theme_rough +
+  ggplot2::theme(
+    legend.position = "bottom",
+    axis.title = ggplot2::element_blank(),
+    axis.text = ggplot2::element_blank(),
+    axis.line = ggplot2::element_blank(),
+    axis.ticks = ggplot2::element_blank(),
+    plot.margin = ggplot2::unit(c(0.1,0.4,-0.4,0.4),"cm"),
+    panel.spacing = ggplot2::unit(0, "lines")) + 
+  NULL;
+
+## -----------------------------------------------------------------------------
+# Select the recoded languages with trill:
+data_R_revision_trill_rs <- dplyr::filter(data_R_revision, revision=="trilled",
+                                          Meaning %in% c("rough","smooth"));
+
+data_r_revision_trill_rs_1 <- data_R_revision_trill_rs %>% 
+  dplyr::mutate(Trill=ifelse(revision=="trilled","yes"));
+
+# recode as factors:
+data_r_revision_trill_rs_1$rough <- factor(c("no", "yes")[as.numeric(data_r_revision_trill_rs_1$rough)+1], levels=c("no", "yes"));
+data_r_revision_trill_rs_1$r     <- factor(c("no", "yes")[as.numeric(data_r_revision_trill_rs_1$r)+1],     levels=c("no", "yes"));
+data_r_revision_trill_rs_1$l     <- factor(c("no", "yes")[as.numeric(data_r_revision_trill_rs_1$l)+1],     levels=c("no", "yes"));
+
+## ----results='hide', warning=FALSE, message=FALSE-----------------------------
+file_name <- "./cached/xling_replic_withr.RData";
+if( !file.exists(file_name) )
+{
+  # cache these results:
+  
+  ## Frequentist ##
+  set.seed(314); # for replicability
+  m1 <- glmer(r ~ 1 + rough +
+                (1 + rough | Family) +
+                (1 + rough | Area),
+              data=data_r_revision_trill_rs_1 ,
+              family=binomial()); # singular fit
+  rePCA(m1); summary(m1); # seems to be the Area -> let' try to remove (rough | Area)
+  m2 <- update(m1, . ~ . - (1 + rough | Area) + (1 | Area)); summary(m2); anova(m1, m2); # all is good (and nova's p=0.94 and ΔAIC=-3.87 in favor of m1)
+  m0 <- update(m2, . ~ . - rough); summary(m0); rePCA(m0); # singular fit due to Area but it's the null model so it's probably ok...
+  anova(m2, m0); # better than the null (p=0.004, ΔAIC=-6.28)
+  plot_prefix <- "./figures/xling_glmer_rs_logistic_mod_r_revision";
+  plot_model(m2, type="pred", terms="rough"); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  xling_glmer_rs_logistic_mod_r_revision_results <- list("model"=m2, # needed for later comparisons
+                                                         "cmp_to_null"=anova(m2, m0), "plot_prefix"=plot_prefix);
+  
+  
+  ## Bayesian ##
+  # check the priors that we can set:
+  get_prior(r ~ 1 + rough +
+              (1 + rough | Family) +
+              (1 + rough | Area),
+            data=data_r_revision_trill_rs_1 ,
+            family="bernoulli");
+  # setting the priors (using the same as the original paper):
+  b1_priors <- c(
+    brms::set_prior("student_t(5,0,2.5)", class = "b"),
+    brms::set_prior("student_t(5,0,2.5)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Area")
+  ); # for the full model
+  # prior predictive checks:
+  set.seed(314); # for replicability
+  b_prior <- brms::brm(r ~ 1 + rough +
+                         (1 + rough | Family) +
+                         (1 + rough | Area),
+                       data=data_r_revision_trill_rs_1,
+                       prior=b1_priors,
+                       family="bernoulli",
+                       sample_prior='only',  # needed for prior predictive checks
+                       cores=brms_ncores, iter=2000, warmup=1000, seed=314);
+  # save the results we need later on:
+  plot_prefix <- "./figures/xling_brm_rs_logistic_mod_r_revision";
+  g <- arrangeGrob(pp_check(b_prior, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Prior predictive distribution of minimum values'),
+                   pp_check(b_prior, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Prior predictive distribution of means'),
+                   pp_check(b_prior, type='stat', stat='max') + xlab('p(r)') + ggtitle('Prior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min, even if the mean is a bit off but not much)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_prior_predictive_checks.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  # fit the logistic model:
+  set.seed(314); # for replicability
+  b1 <- brms::brm(r ~ 1 + rough +
+                    (1 + rough | Family) +
+                    (1 + rough | Area),
+                  data=data_r_revision_trill_rs_1 ,
+                  prior=b1_priors,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), seed=314); # adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b1); mcmc_plot(b1, type="trace"); mcmc_plot(b1);
+  (hyps <- brms::hypothesis(b1, c("roughyes = 0", "roughyes > 0")));
+  (hdi95 <- hdi(b1, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- "./figures/xling_brm_rs_logistic_mod_r_revision";
+  mcmc_plot(b1, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b1); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b1, type="pred", terms="rough"); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod <- capture.output(summary(b1));
+  probs_text <- capture.output(probs <- logistic_summary(b1, dat=data_r_revision_trill_rs_1, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b1, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b1, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+
+  # model comparison with the null model:
+  b0_priors <- c(
+    brms::set_prior("student_t(5,0,2.5)", class = "Intercept"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Area")
+  ); # for the null model
+  b0 <- brms::brm(r ~ 1 +
+                    (1 | Family) +
+                    (1 | Area),
+                  data=data_r_revision_trill_rs_1 ,
+                  prior=b0_priors,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), seed=314); # adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b0); 
+  mcmc_plot(b0, type="trace"); 
+  mcmc_plot(b0);
+  b0 <- brms_fit_indices(b0);
+  b1 <- brms_fit_indices(b1, moment_match=TRUE);
+  (modcmp <- brms_compare_models(b0, b1, "[null]", "[+ 'rough']", bayes_factor=brms_bayes_factors));
+  # --> clear positive effect of 'rough'
+  
+  
+  # compare with the default  priors (prior sensitivity check):
+  set.seed(314); # for replicability
+  b1f <- brms::brm(r ~ 1 + rough +
+                    (1 + rough | Family) +
+                    (1 + rough | Area),
+                  data=data_r_revision_trill_rs_1 ,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), seed=314); # adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b1f); mcmc_plot(b1f, type="trace"); mcmc_plot(b1f);
+  (hyps_f <- brms::hypothesis(b1f, c("roughyes = 0", "roughyes > 0")));
+  (hdi95_f <- hdi(b1f, ci=0.95));
+  pp_check(b1f, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay');
+  g <- arrangeGrob(pp_check(b1f, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1f, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1f, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g);
+  b1f <- brms_fit_indices(b1f, moment_match=TRUE);
+  (modcmp_f <- brms_compare_models(b1, b1f, "[custom prior]", "[default prior]", bayes_factor=brms_bayes_factors)); # virtually identical
+  
+  
+  # compare with priors suggested by MGN (prior sensitivity check):
+  b1_priors_mgn <- c(
+    brms::set_prior("normal(0, 3)", class = "b"),
+    brms::set_prior("normal(0, 3)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Area")
+  ); # for the full model
+  set.seed(314); # for replicability
+  b1_mgn <- brms::brm(r ~ 1 + rough +
+                    (1 + rough | Family) +
+                    (1 + rough | Area),
+                  data=data_r_revision_trill_rs_1,
+                  prior=b1_priors_mgn,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), seed=314); # adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b1_mgn); mcmc_plot(b1_mgn, type="trace"); mcmc_plot(b1_mgn);
+  (hyps_mgn <- brms::hypothesis(b1_mgn, c("roughyes = 0", "roughyes > 0")));
+  (hdi95_mgn <- hdi(b1_mgn, ci=0.95));
+  pp_check(b1_mgn, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay');
+  g <- arrangeGrob(pp_check(b1_mgn, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1_mgn, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1_mgn, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g);
+  b1_mgn <- brms_fit_indices(b1_mgn);
+  (modcmp_mgn <- brms_compare_models(b1, b1_mgn, "[custom prior]", "[mgn prior]", bayes_factor=brms_bayes_factors)); # virtually identical
+  
+  
+  xling_brm_rs_logistic_mod_r_revision_results <- list("model"=b1, # needed for later comparisons
+                                                       "summary"=summary_mod, "hypotheses"=hyps, "hdi95"=hdi95, "cmp_to_null"=modcmp, "probs"=probs, "probs_text"=probs_text, "plot_prefix"=plot_prefix);
+  
+  # save the results we need later on:
+  save(xling_brm_rs_logistic_mod_r_revision_results, 
+       xling_glmer_rs_logistic_mod_r_revision_results,
+       file=file_name, compress="xz", compression_level=9); # save this model
+} else
+{
+  load(file_name);
+}
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_rs_logistic_mod_r_revision_results$summary,sep="\n"));
+
+## -----------------------------------------------------------------------------
+xling_brm_rs_logistic_mod_r_revision_results$hypotheses;
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_rs_logistic_mod_r_revision_results$probs_text,sep="\n"));
+
+## -----------------------------------------------------------------------------
+summary(xling_glmer_rs_logistic_mod_r_revision_results$model);
+
+## -----------------------------------------------------------------------------
+# Select the recoded languages without trill:
+data_R_revision_other_rs <- dplyr::filter(data_R_revision, revision=="other",
+                                          Meaning %in% c("rough","smooth"));
+
+data_r_revision_other_rs_1 <- data_R_revision_other_rs %>% 
+  dplyr::mutate(Trill=ifelse(revision=="other","no"));
+
+# recode as factors:
+data_r_revision_other_rs_1$rough <- factor(c("no", "yes")[as.numeric(data_r_revision_other_rs_1$rough)+1], levels=c("no", "yes"));
+data_r_revision_other_rs_1$r     <- factor(c("no", "yes")[as.numeric(data_r_revision_other_rs_1$r)+1],     levels=c("no", "yes"));
+data_r_revision_other_rs_1$l     <- factor(c("no", "yes")[as.numeric(data_r_revision_other_rs_1$l)+1],     levels=c("no", "yes"));
+
+## ----results='hide', warning=FALSE, message=FALSE-----------------------------
+file_name <- "./cached/xling_replic_withoutr.RData";
+if( !file.exists(file_name) )
+{
+  # cache these results:
+  
+  ## Frequentist ##
+  set.seed(314); # for replicability
+  m1 <- glmer(r ~ 1 + rough +
+                (1 + rough | Family) +
+                (1 + rough | Area),
+              data=data_r_revision_other_rs_1 ,
+              family=binomial()); # singular fit
+  rePCA(m1); summary(m1); # seems to be the Area -> let' try to remove (rough | Area)
+  m2 <- update(m1, . ~ . - (1 + rough | Area) + (1 | Area)); summary(m2); anova(m1, m2); # all is good (and nova's p=0.93 and ΔAIC=-3.86 in favor of m1)
+  m0 <- update(m2, . ~ . - rough, control=glmerControl(optCtrl=list(maxfun=2e4), optimizer="bobyqa")); summary(m0); # using bobyqu to get rid of a "Model failed to converge with max|grad|..." warning
+  anova(m2, m0); # better than the null (p=0.017, ΔAIC=-3.75)
+  plot_prefix <- "./figures/xling_nt_glmer_rs_logistic_mod_o_revision";
+  plot_model(m2, type="pred", terms="rough"); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  xling_glmer_rs_logistic_mod_o_revision_results <- list("model"=m2, # needed for later comparisons
+                                                         "cmp_to_null"=anova(m2, m0), "plot_prefix"=plot_prefix);
+  
+  
+  ## Bayesian ##
+  # check the priors that we can set:
+  get_prior(r ~ 1 + rough +
+              (1 + rough | Family) +
+              (1 + rough | Area),
+            data=data_r_revision_other_rs_1 ,
+            family="bernoulli");
+  # setting the priors:
+  b1_priors <- c(
+    brms::set_prior("student_t(5,0,2.5)", class = "b"),
+    brms::set_prior("student_t(5,0,2.5)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Area")
+  ); # for the full model
+  # prior predictive checks:
+  set.seed(314); # for replicability
+  b_prior <- brms::brm(r ~ 1 + rough +
+                         (1 + rough | Family) +
+                         (1 + rough | Area),
+                       data=data_r_revision_other_rs_1,
+                       prior=b1_priors,
+                       family="bernoulli",
+                       sample_prior='only',  # needed for prior predictive checks
+                       cores=brms_ncores, seed=314);
+  # save the results we need later on:
+  plot_prefix <- "./figures/xling_nt_brm_rs_logistic_mod_o_revision";
+  g <- arrangeGrob(pp_check(b_prior, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Prior predictive distribution of minimum values'),
+                   pp_check(b_prior, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Prior predictive distribution of means'),
+                   pp_check(b_prior, type='stat', stat='max') + xlab('p(r)') + ggtitle('Prior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min, even if the mean is a bit off but not much)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_prior_predictive_checks.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  # fit the logistic model:
+  set.seed(314); # for replicability
+  b1 <- brms::brm(r ~ 1 + rough +
+                    (1 + rough | Family) +
+                    (1 + rough | Area),
+                  data=data_r_revision_other_rs_1 ,
+                  prior=b1_priors,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), seed=314); # adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b1); mcmc_plot(b1, type="trace"); mcmc_plot(b1);
+  (hyps <- brms::hypothesis(b1, c("roughyes = 0", "roughyes > 0")));
+  (hdi95 <- hdi(b1, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- "./figures/xling_nt_brm_rs_logistic_mod_o_revision";
+  mcmc_plot(b1, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b1); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b1, type="pred", terms="rough"); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod <- capture.output(summary(b1));
+  probs_text <- capture.output(probs <- logistic_summary(b1, dat=data_r_revision_other_rs_1, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b1, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b1, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+
+  # model comparison with the null model:
+  b0_priors <- c(
+    brms::set_prior("student_t(5,0,2.5)", class = "Intercept"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Area")
+  ); # for the null model
+  b0 <- brms::brm(r ~ 1 +
+                    (1 | Family) +
+                    (1 | Area),
+                  data=data_r_revision_other_rs_1 ,
+                  prior=b0_priors,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), seed=314); # adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b0); 
+  mcmc_plot(b0, type="trace"); 
+  mcmc_plot(b0);
+  b0 <- brms_fit_indices(b0);
+  b1 <- brms_fit_indices(b1, moment_match=TRUE);
+  (modcmp <- brms_compare_models(b0, b1, "[null]", "[+ 'rough']", bayes_factor=brms_bayes_factors));
+  # --> clear positive effect of 'rough'
+  
+  
+  # compare with the default  priors (prior sensitivity check):
+  set.seed(314); # for replicability
+  b1f <- brms::brm(r ~ 1 + rough +
+                    (1 + rough | Family) +
+                    (1 + rough | Area),
+                  data=data_r_revision_other_rs_1 ,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, iter=3000, control=list(adapt_delta=0.99), seed=314); # iter=3000 needed to avoid ESS being too low; adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b1f); mcmc_plot(b1f, type="trace"); mcmc_plot(b1f);
+  (hyps_f <- brms::hypothesis(b1f, c("roughyes = 0", "roughyes > 0")));
+  (hdi95_f <- hdi(b1f, ci=0.95));
+  pp_check(b1f, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay');
+  g <- arrangeGrob(pp_check(b1f, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1f, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1f, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g);
+  b1f <- brms_fit_indices(b1f, moment_match=TRUE);
+  (modcmp_f <- brms_compare_models(b1, b1f, "[custom prior]", "[default prior]", bayes_factor=brms_bayes_factors)); # virtually identical
+  
+  
+  # compare with priors suggested by MGN (prior sensitivity check):
+  b1_priors_mgn <- c(
+    brms::set_prior("normal(0, 3)", class = "b"),
+    brms::set_prior("normal(0, 3)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Area")
+  ); # for the full model
+  set.seed(314); # for replicability
+  b1_mgn <- brms::brm(r ~ 1 + rough +
+                    (1 + rough | Family) +
+                    (1 + rough | Area),
+                  data=data_r_revision_other_rs_1,
+                  prior=b1_priors_mgn,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b1_mgn); mcmc_plot(b1_mgn, type="trace"); mcmc_plot(b1_mgn);
+  (hyps_mgn <- brms::hypothesis(b1_mgn, c("roughyes = 0", "roughyes > 0")));
+  (hdi95_mgn <- hdi(b1_mgn, ci=0.95));
+  pp_check(b1_mgn, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay');
+  g <- arrangeGrob(pp_check(b1_mgn, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1_mgn, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1_mgn, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g);
+  b1_mgn <- brms_fit_indices(b1_mgn);
+  (modcmp_mgn <- brms_compare_models(b1, b1_mgn, "[custom prior]", "[mgn prior]", bayes_factor=brms_bayes_factors)); # the mgn prior seems a bit worse
+  
+  
+  xling_brm_rs_logistic_mod_o_revision_results <- list("model"=b1, # needed for later comparisons
+                                                       "summary"=summary_mod, "hypotheses"=hyps, "hdi95"=hdi95, "cmp_to_null"=modcmp, "probs"=probs, "probs_text"=probs_text, "plot_prefix"=plot_prefix);
+  
+  # save the results we need later on:
+  save(xling_brm_rs_logistic_mod_o_revision_results, 
+       xling_glmer_rs_logistic_mod_o_revision_results,
+       file=file_name, compress="xz", compression_level=9); # save this model
+} else
+{
+  load(file_name);
+}
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_rs_logistic_mod_o_revision_results$summary,sep="\n"));
+
+## -----------------------------------------------------------------------------
+xling_brm_rs_logistic_mod_o_revision_results$hypotheses;
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_rs_logistic_mod_o_revision_results$probs_text,sep="\n"));
+
+## -----------------------------------------------------------------------------
+summary(xling_glmer_rs_logistic_mod_o_revision_results$model);
+
+## -----------------------------------------------------------------------------
+# Select the recoded languages:
+data_full_revised <- rough_r_data %>%
+  dplyr::filter(Family!="Indo-European") %>%
+  dplyr::filter(!is.na(revision)) %>% 
+  dplyr::mutate(Trill=ifelse(revision=="other","no",
+                             ifelse(revision=="trilled","yes",NA))) %>% 
+  dplyr::filter(Meaning %in% c("rough","smooth"),
+                !is.na(Trill));
+
+# recode as factors:
+data_full_revised$rough <- factor(c("no", "yes")[as.numeric(data_full_revised$rough)+1], levels=c("no", "yes"));
+data_full_revised$r     <- factor(c("no", "yes")[as.numeric(data_full_revised$r)+1],     levels=c("no", "yes"));
+data_full_revised$l     <- factor(c("no", "yes")[as.numeric(data_full_revised$l)+1],     levels=c("no", "yes"));
+data_full_revised$Trill <- factor(data_full_revised$Trill,                               levels=c("no", "yes"));
+
+## ----results='hide', warning=FALSE, message=FALSE-----------------------------
+file_name <- "./cached/xling_replic_omnibus.RData";
+if( !file.exists(file_name) )
+{
+  # cache these results:
+  
+  ## Frequentist ##
+  set.seed(314); # for replicability
+  m1 <- glmer(r ~ 1 + rough * Trill +
+                (1 + rough * Trill | Family) +
+                (1 + rough * Trill | Area),
+              data=data_full_revised ,
+              family=binomial(), 
+              control=glmerControl(optCtrl=list(maxfun=2e4), optimizer="bobyqa")); # singular fit
+  rePCA(m1); summary(m1); # seems to be the Area -> let' try to remove (rough | Area)
+  m2 <- update(m1, . ~ . - (1 + rough * Trill | Area) + (1 + rough + Trill | Area) -
+                 (1 + rough * Trill | Family) + (1 + rough + Trill | Family) - 
+                 (1 + rough + Trill | Area) + (1 + rough | Area) - 
+                 (1 + rough | Area) + (1 | Area) - 
+                 (1 | Area) - 
+                 (1 + rough + Trill | Family) + (1 + rough | Family)); rePCA(m2); summary(m2); anova(m1, m2); # ok, not singular...
+  m0 <- update(m2, . ~ . - rough * Trill, control=glmerControl(optCtrl=list(maxfun=2e4), optimizer="bobyqa")); summary(m0); # using bobyqa to get rid of a "Model failed to converge with max|grad|..." warning
+  anova(m2, m0); # better than the null (p=0.0056, ΔAIC=-6.61)
+  plot_prefix <- "./figures/xling_glmer_omnibus_mod_r_revision";
+  plot_model(m2, type="pred", terms="rough"); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  xling_glmer_omnibus_mod_r_revision_results <- list("model"=m2, # needed for later comparisons
+                                                     "cmp_to_null"=anova(m2, m0), "plot_prefix"=plot_prefix);
+  
+  
+  ## Bayesian ##
+  # check the priors that we can set:
+  get_prior(r ~ 1 + rough * Trill +
+              (1 + rough * Trill | Family) +
+              (1 + rough * Trill | Area),
+            data=data_full_revised ,
+            family="bernoulli");
+  # setting the priors:
+  b1_priors <- c(
+    brms::set_prior("student_t(5,0,2.5)", class = "b"),
+    brms::set_prior("student_t(5,0,2.5)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Trillyes", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes:Trillyes", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Area"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Trillyes", group="Area"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes:Trillyes", group="Area")
+  ); # for the full model
+  # prior predictive checks:
+  set.seed(314); # for replicability
+  b_prior <- brms::brm(r ~ 1 + rough * Trill +
+                         (1 + rough * Trill | Family) +
+                         (1 + rough * Trill | Area),
+                       data=data_full_revised,
+                       prior=b1_priors,
+                       family="bernoulli",
+                       sample_prior='only',  # needed for prior predictive checks
+                       cores=brms_ncores, seed=314);
+  # save the results we need later on:
+  plot_prefix <- "./figures/xling_brm_omnibus_mod_r_revision";
+  g <- arrangeGrob(pp_check(b_prior, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Prior predictive distribution of minimum values'),
+                   pp_check(b_prior, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Prior predictive distribution of means'),
+                   pp_check(b_prior, type='stat', stat='max') + xlab('p(r)') + ggtitle('Prior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min, even if the mean is a bit off but not much)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_prior_predictive_checks.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  # fit the logistic model:
+  set.seed(314); # for replicability
+  b1 <- brms::brm(r ~ 1 + rough * Trill +
+                         (1 + rough * Trill | Family) +
+                         (1 + rough * Trill | Area),
+                       data=data_full_revised,
+                  prior=b1_priors,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), seed=314); # adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b1); mcmc_plot(b1, type="trace"); mcmc_plot(b1);
+  (hyps_full <- brms::hypothesis(b1, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0", "roughyes:Trillyes = 0")));
+  (hdi95_full <- hdi(b1, ci=0.95));
+  m_full <- b1;
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_full <- "./figures/xling_brm_omnibus_mod_r_revision_full";
+  mcmc_plot(b1, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b1); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b1, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_full <- capture.output(summary(b1));
+  probs_text_full <- capture.output(probs_full <- logistic_summary(b1, dat=data_full_revised, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b1, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b1, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+
+  # model comparison with the null model:
+  b0_priors <- c(
+    brms::set_prior("student_t(5,0,2.5)", class = "Intercept"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Area")
+  ); # for the null model
+  b0 <- brms::brm(r ~ 1 +
+                    (1 | Family) +
+                    (1 | Area),
+                  data=data_full_revised ,
+                  prior=b0_priors,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), seed=314); # adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b0); 
+  mcmc_plot(b0, type="trace"); 
+  mcmc_plot(b0);
+  b0 <- brms_fit_indices(b0);
+  m_full <- brms_fit_indices(m_full);
+  (modcmp_0_full <- brms_compare_models(b0, m_full, "[null]", "[full]", bayes_factor=brms_bayes_factors)); # full is better than null
+
+
+  ## following @winter_trilled_2022 observation "When the same model is fitted without by-Family random slopes over Trill, essentially the same results are obtained, but with narrower credible intervals" we also fit a model without these:
+  b2_priors <- c(
+    set_prior("student_t(5,0,2.5)", class = "b"),
+    set_prior("student_t(5,0,2.5)", class = "Intercept"),
+    set_prior("lkj(2)", class = "cor"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Family"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Family"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Area"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Area"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Trillyes", group="Area"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes:Trillyes", group="Area")
+  ); # for the full model
+  # prior predictive checks:
+  set.seed(314); # for replicability
+  plot_prefix <- plot_prefix_original <- "./figures/xling_brm_omnibus_mod_r_revision_original";
+  b_prior <- brms::brm(r ~ 1 + rough * Trill +
+                         (1 + rough | Family) +
+                         (1 + rough * Trill | Area),
+                       data=data_full_revised,
+                       prior=b2_priors,
+                       family="bernoulli",
+                       sample_prior='only',  # needed for prior predictive checks
+                       cores=brms_ncores, seed=314);
+  g <- arrangeGrob(pp_check(b_prior, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Prior predictive distribution of minimum values'),
+                   pp_check(b_prior, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Prior predictive distribution of means'),
+                   pp_check(b_prior, type='stat', stat='max') + xlab('p(r)') + ggtitle('Prior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min, even if the mean is a bit off but not much)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_prior_predictive_checks.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  set.seed(314); # for replicability
+  b2 <- brms::brm(r ~ 1 + rough * Trill +
+                    (1 + rough | Family) +
+                    (1 + rough * Trill | Area),
+                  data=data_full_revised,
+                  prior=b2_priors,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b2); mcmc_plot(b2, type="trace"); mcmc_plot(b2);
+  (hyps_original <- brms::hypothesis(b2, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0", "roughyes:Trillyes = 0")));
+  (hdi95_original <- hdi(b2, ci=0.95));
+  m_original <- b2;
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_original <- "./figures/xling_brm_omnibus_mod_r_revision_original";
+  mcmc_plot(b2, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b2); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b2, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_original <- capture.output(summary(b2));
+  probs_text_original <- capture.output(probs_original <- logistic_summary(b2, dat=data_full_revised, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b2, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b2, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b2, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b2, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  # model comparisons
+  m_original <- brms_fit_indices(m_original, moment_match=TRUE);
+  (modcmp_0_original <- brms_compare_models(b0, m_original, "[null]", "[original]", bayes_factor=brms_bayes_factors)); # original is better than null
+  (modcmp_full_original <- brms_compare_models(m_full, m_original, "[full]", "[original]", bayes_factor=brms_bayes_factors)); # original seems marginally better than full
+  # ---> indeed, m_original seems slightly better, so we'll use it here (just as @winter_trilled_2022 suggest)
+
+  
+  ## check if Trill:rough really matters (because it seems it might not):
+  b3_priors <- c(
+    set_prior("student_t(5,0,2.5)", class = "b"),
+    set_prior("student_t(5,0,2.5)", class = "Intercept"),
+    set_prior("lkj(2)", class = "cor"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Family"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Family"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Area"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Area"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Trillyes", group="Area")
+  ); # for the full model
+  set.seed(314); # for replicability
+  b3 <- brms::brm(r ~ 1 + rough + Trill +
+                         (1 + rough | Family) +
+                         (1 + rough + Trill | Area),
+                       data=data_full_revised,
+                  prior=b3_priors,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b3); mcmc_plot(b3, type="trace"); mcmc_plot(b3);
+  (hyps_noint <- brms::hypothesis(b3, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0")));
+  (hdi95_noint <- hdi(b3, ci=0.95));
+  m_noint <- b3;
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_noint <- "./figures/xling_brm_omnibus_mod_r_revision_noint";
+  mcmc_plot(b3, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b3); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b3, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_noint <- capture.output(summary(b3));
+  probs_text_noint <- capture.output(probs_noint <- logistic_summary(b3, dat=data_full_revised, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b3, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b3, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b3, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b3, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  # model comparisons
+  m_noint <- brms_fit_indices(m_noint, moment_match=TRUE);
+  (modcmp_0_noint <- brms_compare_models(b0, m_noint, "[null]", "[noint]", bayes_factor=brms_bayes_factors)); # noint is better than null
+  (modcmp_full_noint <- brms_compare_models(m_full, m_noint, "[full]", "[noint]", bayes_factor=brms_bayes_factors)); # noint is better than full
+  (modcmp_original_noint <- brms_compare_models(m_original, m_noint, "[original]", "[noint]", bayes_factor=brms_bayes_factors)); # noint is marginally better
+  # -> we can remove the interaction Trill:rough...
+
+
+  # check if Trill is needed at all (because it seems it might not):
+  b4_priors <- c(
+    set_prior("student_t(5,0,2.5)", class = "b"),
+    set_prior("student_t(5,0,2.5)", class = "Intercept"),
+    set_prior("lkj(2)", class = "cor"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Family"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Family"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Area"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Area")
+  ); # no Trill
+  set.seed(314); # for replicability
+  b4 <- brms::brm(r ~ 1 + rough +
+                    (1 + rough | Family) +
+                    (1 + rough | Area),
+                  data=data_full_revised,
+                  prior=b4_priors,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b4); mcmc_plot(b4, type="trace"); mcmc_plot(b4);
+  (hyps_notrill <- brms::hypothesis(b4, c("roughyes = 0", "roughyes > 0")));
+  (hdi95_notrill <- hdi(b4, ci=0.95));
+  m_notrill <- b4;
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_notrill <- "./figures/xling_brm_omnibus_mod_r_revision_notrill";
+  mcmc_plot(b4, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b4); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b4, type="pred", terms=c("rough")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_notrill <- capture.output(summary(b4));
+  probs_text_notrill <- capture.output(probs_notrill <- logistic_summary(b4, dat=data_full_revised, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b4, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b4, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b4, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b4, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  # model comparisons
+  m_notrill <- brms_fit_indices(m_notrill);
+  (modcmp_0_notrill <- brms_compare_models(b0, m_notrill, "[null]", "[notrill]", bayes_factor=brms_bayes_factors)); # notrill is better than null
+  (modcmp_full_notrill <- brms_compare_models(m_full, m_notrill, "[full]", "[notrill]", bayes_factor=brms_bayes_factors)); # notrill is better than full
+  (modcmp_original_notrill <- brms_compare_models(m_original, m_notrill, "[original]", "[notrill]", bayes_factor=brms_bayes_factors)); # notrill is better than the original
+  (modcmp_noint_notrill <- brms_compare_models(m_noint, m_notrill, "[noint]", "[notrill]", bayes_factor=brms_bayes_factors)); # they are equivalent
+  # -> so, Trill is not needed at all...
+  
+  
+  # compare with the default  priors (prior sensitivity check):
+  set.seed(314); # for replicability
+  b2f <- brms::brm(r ~ 1 + rough * Trill +
+                    (1 + rough | Family) +
+                    (1 + rough * Trill | Area),
+                  data=data_full_revised,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b2f); mcmc_plot(b2f, type="trace"); mcmc_plot(b2f);
+  (hyps_f <- brms::hypothesis(b2f, c("roughyes = 0", "roughyes > 0")));
+  (hdi95_f <- hdi(b2f, ci=0.95));
+  pp_check(b2f, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay');
+  g <- arrangeGrob(pp_check(b2f, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b2f, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b2f, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g);
+  b2f <- brms_fit_indices(b2f, moment_match=TRUE);
+  (modcmp_f <- brms_compare_models(m_original, b2f, "[custom prior]", "[default prior]", bayes_factor=brms_bayes_factors)); # virtually identical
+  
+  
+  # compare with priors suggested by MGN (prior sensitivity check):
+  b2_priors_mgn <- c(
+    brms::set_prior("normal(0, 3)", class = "b"),
+    brms::set_prior("normal(0, 3)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Area"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Trillyes", group="Area"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes:Trillyes", group="Area")
+  ); # for the full model
+  set.seed(314); # for replicability
+  b2_mgn <- brms::brm(r ~ 1 + rough * Trill +
+                    (1 + rough | Family) +
+                    (1 + rough * Trill | Area),
+                  data=data_full_revised,
+                  prior=b2_priors_mgn,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b2_mgn); mcmc_plot(b2_mgn, type="trace"); mcmc_plot(b2_mgn);
+  (hyps_mgn <- brms::hypothesis(b2_mgn, c("roughyes = 0", "roughyes > 0")));
+  (hdi95_mgn <- hdi(b2_mgn, ci=0.95));
+  pp_check(b2_mgn, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay');
+  g <- arrangeGrob(pp_check(b2_mgn, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b2_mgn, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b2_mgn, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g);
+  b2_mgn <- brms_fit_indices(b2_mgn);
+  (modcmp_mgn <- brms_compare_models(m_original, b2_mgn, "[custom prior]", "[mgn prior]", bayes_factor=brms_bayes_factors)); # equivalent
+
+  
+  xling_brm_omnibus_mod_r_revision_results <- list("full"=list("model"=m_full, # needed for later comparisons
+                                                               "summary"=summary_mod_full, "hypotheses"=hyps_full, "hdi95"=hdi95_full, 
+                                                               "cmp_to_null"=modcmp_0_full, "probs"=probs_full, "probs_text"=probs_text_full, "plot_prefix"=plot_prefix_full),
+                                                   "original"=list("model"=m_original, # needed for later comparisons
+                                                               "summary"=summary_mod_original, "hypotheses"=hyps_original, "hdi95"=hdi95_original, 
+                                                               "cmp_to_null"=modcmp_0_original,  "cmp_to_full"=modcmp_full_original, "probs"=probs_original, "probs_text"=probs_text_original, "plot_prefix"=plot_prefix_original),
+                                                   "noint"=list("model"=NULL, #m_noint, # needed for later comparisons
+                                                               "summary"=summary_mod_noint, "hypotheses"=hyps_noint, "hdi95"=hdi95_noint, 
+                                                               "cmp_to_null"=modcmp_0_noint,  "cmp_to_full"=modcmp_full_noint, "cmp_to_original"=modcmp_original_noint, "probs"=probs_noint, "probs_text"=probs_text_noint, "plot_prefix"=plot_prefix_noint),
+                                                   "notrill"=list("model"=NULL, #m_notrill, # needed for later comparisons
+                                                               "summary"=summary_mod_notrill, "hypotheses"=hyps_notrill, "hdi95"=hdi95_notrill, 
+                                                               "cmp_to_null"=modcmp_0_notrill,  "cmp_to_full"=modcmp_full_notrill, "cmp_to_original"=modcmp_original_notrill, "cmp_to_noint"=modcmp_noint_notrill, 
+                                                               "probs"=probs_notrill, "probs_text"=probs_text_notrill, "plot_prefix"=plot_prefix_notrill));
+  
+  # save the results we need later on:
+  save(xling_brm_omnibus_mod_r_revision_results, 
+       xling_glmer_omnibus_mod_r_revision_results,
+       file=file_name, compress="xz", compression_level=9); # save this model
+} else
+{
+  load(file_name);
+}
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_omnibus_mod_r_revision_results$original$summary,sep="\n"));
+
+## -----------------------------------------------------------------------------
+xling_brm_omnibus_mod_r_revision_results$original$hypotheses;
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_omnibus_mod_r_revision_results$original$probs_text,sep="\n"));
+
+## -----------------------------------------------------------------------------
+summary(xling_glmer_omnibus_mod_r_revision_results$model);
+
+## ----results='hide', warning=FALSE, message=FALSE-----------------------------
+# load the original model results:
+xling_brm_rs_logistic_mod_r <- readRDS("models/xling_brm_rs_logistic_mod_r.rds");
+xling_nt_brm_rs_logistic_mod_r <- readRDS("models/xling_nt_brm_rs_logistic_mod_r.rds");
+
+## -----------------------------------------------------------------------------
+mod_preds_trill <- logistic_summary(xling_brm_rs_logistic_mod_r, dat=xling, outcome="/r/", roughpred="rough", pp_over_zero=TRUE);
+mod_dat_trill <- data.frame(Meaning.f=factor(c("‘smooth’", "‘rough’"), levels=c("‘smooth’", "‘rough’")),
+                            pred=c(mean(mod_preds_trill$pred_prob_smooth),mean(mod_preds_trill$pred_prob_rough))*100,
+                            ll=c(quantile(mod_preds_trill$pred_prob_smooth, 0.025),quantile(mod_preds_trill$pred_prob_rough, 0.025))*100,
+                            ul=c(quantile(mod_preds_trill$pred_prob_smooth, 0.975),quantile(mod_preds_trill$pred_prob_rough, 0.975))*100);
+
+## -----------------------------------------------------------------------------
+mod_preds_nt <- logistic_summary(xling_nt_brm_rs_logistic_mod_r, dat=xling, outcome="/r/", roughpred="rough", pp_over_zero=TRUE);
+mod_dat_nt <- data.frame(Meaning.f=factor(c("‘smooth’", "‘rough’"), levels=c("‘smooth’", "‘rough’")),
+                         pred=c(mean(mod_preds_nt$pred_prob_smooth),mean(mod_preds_nt$pred_prob_rough))*100,
+                         ll=c(quantile(mod_preds_nt$pred_prob_smooth, 0.025),quantile(mod_preds_nt$pred_prob_rough, 0.025))*100,
+                         ul=c(quantile(mod_preds_nt$pred_prob_smooth, 0.975),quantile(mod_preds_nt$pred_prob_rough, 0.975))*100);
+
+## ----results='hide', warning=FALSE, message=FALSE-----------------------------
+mod_dat <- bind_rows(mod_dat_trill, mod_dat_nt) %>%
+  dplyr::mutate(Trill=factor(c("trilled /r/","trilled /r/","other /r/","other /r/"), levels=c("trilled /r/","other /r/")));
+
+r_per_family <- xling %>%
+  dplyr::group_by(Family, Trill, Meaning.f) %>%
+  dplyr::summarise(perc_r = mean(r)*100, n=length(unique(Language))) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(Trill=recode(Trill, yes="trilled /r/", no="other /r/"), Trill=factor(Trill, levels=c("trilled /r/","other /r/")));
+
+## -----------------------------------------------------------------------------
+mod_preds_trill_revision <- xling_brm_rs_logistic_mod_r_revision_results$probs;
+mod_dat_trill_revision <- data.frame(Meaning.f=factor(c("‘smooth’", "‘rough’"), levels=c("‘smooth’", "‘rough’")),
+                                     pred=c(mean(mod_preds_trill_revision$pred_prob_smooth),mean(mod_preds_trill_revision$pred_prob_rough))*100,
+                                     ll=c(quantile(mod_preds_trill_revision$pred_prob_smooth, 0.025),quantile(mod_preds_trill_revision$pred_prob_rough, 0.025))*100,
+                                     ul=c(quantile(mod_preds_trill_revision$pred_prob_smooth, 0.975),quantile(mod_preds_trill_revision$pred_prob_rough, 0.975))*100);
+cat(paste0(xling_brm_rs_logistic_mod_r_revision_results$probs_text, sep="\n"));
+
+## -----------------------------------------------------------------------------
+mod_preds_nt_revision <- xling_brm_rs_logistic_mod_o_revision_results$probs;
+mod_dat_nt_revision <- data.frame(Meaning.f=factor(c("‘smooth’", "‘rough’"), levels=c("‘smooth’", "‘rough’")),
+                                  pred=c(mean(mod_preds_nt_revision$pred_prob_smooth),mean(mod_preds_nt_revision$pred_prob_rough))*100,
+                                  ll=c(quantile(mod_preds_nt_revision$pred_prob_smooth, 0.025),quantile(mod_preds_nt_revision$pred_prob_rough, 0.025))*100,
+                                  ul=c(quantile(mod_preds_nt_revision$pred_prob_smooth, 0.975),quantile(mod_preds_nt_revision$pred_prob_rough, 0.975))*100);
+cat(paste0(xling_brm_rs_logistic_mod_o_revision_results$probs_text, sep="\n"));
+
+## ----results='hide', warning=FALSE, message=FALSE-----------------------------
+mod_dat_revision <- bind_rows(mod_dat_trill_revision, mod_dat_nt_revision) %>%
+  dplyr::mutate(Trill=factor(c("trilled /r/","trilled /r/","other /r/","other /r/"), levels=c("trilled /r/","other /r/")));
+
+# raw figures / language family
+r_per_family_revision <- xling_revision %>%
+  dplyr::group_by(Family, Trill, Meaning.f) %>%
+  dplyr::summarise(perc_r = mean(r)*100, n=length(unique(Language))) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(Trill=recode(Trill, yes="trilled /r/", no="other /r/"), Trill=factor(Trill, levels=c("trilled /r/","other /r/")));
+
+
+## ----fig.width=9, fig.height=3.5*2, fig.cap=capFig("Model predictions: the original study of Winter et al. (top) and using the present recoding (bottom). For both plots: left: languages with trilled /r/ in their phonemic inventory; left : languages with a different (non-trilled) kind of /r/. The results are aggregated per family, each colored circle representing one family and the size of the circles is proportional to the number of languages in the family. The big gray circles are the model predicitons with their 95% HDIs.")----
+grid.arrange(ggplot2::ggplot(data = r_per_family, ggplot2::aes(x = Meaning.f, y = perc_r)) + # @winter_trilled_2022
+               ggplot2::facet_grid(. ~ Trill) +
+               ggplot2::geom_point(data=r_per_family, 
+                                   ggplot2::aes(color = perc_r, size = n), alpha = 0.5,
+                                   position = ggbeeswarm::position_quasirandom(width = 0.3)) +
+               ggplot2::geom_errorbar(data=mod_dat,
+                                      ggplot2::aes(ymin = ll, ymax = ul, y=NULL), 
+                                      width = 0.075) +
+               ggplot2::geom_point(data=mod_dat, 
+                                   ggplot2::aes(y=pred), fill="grey", 
+                                   size = 6, shape = 21) +
+               ggplot2::scale_color_gradient(guide = F,
+                                             low=other_col, high=r_col) +
+               ggplot2::scale_y_continuous(breaks=seq(0,100,25), labels=paste0(seq(0,100,25), "%")) +
+               ggplot2::scale_size_continuous(guide = FALSE, range = c(2,6)) +
+               ggplot2::labs(title = "The original study",
+                             y = "% forms with /r/", 
+                             x = "\n") +
+               theme_rough +
+               ggplot2::theme(plot.margin = unit(c(0.4,0.4,-0.6,0.4),"cm")) + 
+               NULL,
+             
+             ggplot2::ggplot(data = r_per_family_revision, aes(x = Meaning.f, y = perc_r)) + # revised
+               ggplot2::facet_grid(. ~ Trill) +
+               ggplot2::geom_point(data=r_per_family_revision, 
+                                   ggplot2::aes(color = perc_r, size = n), alpha = 0.5,
+                                   position = ggbeeswarm::position_quasirandom(width = 0.3)) +
+               ggplot2::geom_errorbar(data=mod_dat_revision,
+                                      ggplot2::aes(ymin = ll, ymax = ul, y=NULL), 
+                                      width = 0.075) +
+               ggplot2::geom_point(data=mod_dat_revision, 
+                                   ggplot2::aes(y=pred), fill="grey", 
+                                   size = 6, shape = 21) +
+               ggplot2::scale_color_gradient(guide = F,
+                                             low=other_col, high=r_col) +
+               ggplot2::scale_y_continuous(breaks=seq(0,100,25), labels=paste0(seq(0,100,25), "%")) +
+               ggplot2::scale_size_continuous(guide = FALSE, range = c(2,6)) +
+               ggplot2::labs(title = "Using the recoding",
+                             y = "% forms with /r/", 
+                             x = "\n") +
+               theme_rough +
+               ggplot2::theme(plot.margin = unit(c(0.4,0.4,-0.6,0.4),"cm")) + 
+               NULL,
+             ncol=1);
+
+## ----results='hide', warning=FALSE, message=FALSE-----------------------------
+# Let's compare the posterior differences of the models:
+posterior_all <- rbind(data.frame("estimate"=mod_preds_trill$pred_prob_smooth,          "study"="original", "trill"="trill", "concept"="smooth"),
+                       data.frame("estimate"=mod_preds_trill$pred_prob_rough,           "study"="original", "trill"="trill", "concept"="rough"),
+                       data.frame("estimate"=mod_preds_nt$pred_prob_smooth,             "study"="original", "trill"="no trill",  "concept"="smooth"),
+                       data.frame("estimate"=mod_preds_nt$pred_prob_rough,              "study"="original", "trill"="no trill",  "concept"="rough"),
+                       data.frame("estimate"=mod_preds_trill_revision$pred_prob_smooth, "study"="recoding", "trill"="trill", "concept"="smooth"),
+                       data.frame("estimate"=mod_preds_trill_revision$pred_prob_rough,  "study"="recoding", "trill"="trill", "concept"="rough"),
+                       data.frame("estimate"=mod_preds_nt_revision$pred_prob_smooth,    "study"="recoding", "trill"="no trill",  "concept"="smooth"),
+                       data.frame("estimate"=mod_preds_nt_revision$pred_prob_rough,     "study"="recoding", "trill"="no trill",  "concept"="rough"));
+posterior_all$study   <- factor(posterior_all$study,   levels=c("original", "recoding"));
+posterior_all$trill   <- factor(posterior_all$trill,   levels=c("no trill", "trill"));
+posterior_all$concept <- factor(posterior_all$concept, levels=c("rough", "smooth"));
+
+posterior_diff <- rbind(data.frame("diff"=mod_preds_trill$pred_prob_diff,          "study"="original", "trill"="trill"),
+                        data.frame("diff"=mod_preds_nt$pred_prob_diff,             "study"="original", "trill"="no trill"),
+                        data.frame("diff"=mod_preds_trill_revision$pred_prob_diff, "study"="recoding", "trill"="trill"),
+                        data.frame("diff"=mod_preds_nt_revision$pred_prob_diff,    "study"="recoding", "trill"="no trill"));
+posterior_diff$study <- factor(posterior_diff$study,   levels=c("original", "recoding"));
+posterior_diff$trill <- factor(posterior_diff$trill,   levels=c("no trill", "trill"));
+
+# statistical tests:
+(t_nt_rough  <- t.test(estimate ~ study, data=posterior_all[ posterior_all$trill == "no trill" & posterior_all$concept == "rough", ], paired=FALSE));
+(t_nt_smooth <- t.test(estimate ~ study, data=posterior_all[ posterior_all$trill == "no trill" & posterior_all$concept == "smooth", ], paired=FALSE));
+(t_tr_rough  <- t.test(estimate ~ study, data=posterior_all[ posterior_all$trill == "trill" & posterior_all$concept == "rough", ], paired=FALSE));
+(t_tr_smooth <- t.test(estimate ~ study, data=posterior_all[ posterior_all$trill == "trill" & posterior_all$concept == "smooth", ], paired=FALSE));
+
+(t_diff_nt  <- t.test(diff ~ study, data=posterior_diff[ posterior_diff$trill == "no trill", ], paired=FALSE));
+(t_diff_tr  <- t.test(diff ~ study, data=posterior_diff[ posterior_diff$trill == "trill", ], paired=FALSE));
+
+## ----fig.width=2*3, 2*3, fig.cap=capFig("Posterior distribution of the estimated probability of /r/ comparing the original [Winter et al.] study (gray) and the recoded study (yellow) separately for the two concepts ('smooth' and 'rough') and the languages with and without a trilled /r/. All independent two sample *t*-tests are highly significant (an artefact of the large posterior sample size), but the actual mean differences between this confirms visually that for the languages without a trill the two studies differ quite dramatically (more /r/ for 'rough' with the recoding but less for 'smooth').")----
+ggplot(posterior_all, aes(x=estimate, fill=study)) + 
+  geom_density(color="black", alpha=0.25) + 
+  facet_grid(trill ~ concept) +
+  xlab("Probability of /r/") +
+  scale_fill_viridis_d() +
+  NULL;
+
+## ----fig.width=2*3, fig.height=3, fig.cap=capFig("Distribution of the posterior differences in the probability of /r/ between the two concepts ('rough' - 'smooth') separately for the languages with and without a trilled /r/. Same conventions as above.")----
+ggplot(posterior_diff, aes(x=diff, fill=study)) + 
+  geom_density(color="black", alpha=0.25) + 
+  facet_wrap(trill ~ .) +
+  xlab("Δ probability of /r/ ('rough' - 'smooth')") +
+  scale_fill_viridis_d() +
+  NULL;
+
+## ----results='hide', warning=FALSE, message=FALSE-----------------------------
+# Plot for paper:
+
+jpeg("./figures/Figure2.jpg",  width=5, height=7, units="in", quality=85, res=300);
+grid.arrange(ggplot2::ggplot(data = r_per_family, ggplot2::aes(x = Meaning.f, y = perc_r)) + # @winter_trilled_2022
+               ggplot2::facet_grid(. ~ Trill) +
+               ggplot2::geom_point(data=r_per_family, 
+                                   ggplot2::aes(color = perc_r, size = n), alpha = 0.5,
+                                   position = ggbeeswarm::position_quasirandom(width = 0.3)) +
+               ggplot2::geom_errorbar(data=mod_dat,
+                                      ggplot2::aes(ymin = ll, ymax = ul, y=NULL), 
+                                      width = 0.075) +
+               ggplot2::geom_point(data=mod_dat, 
+                                   ggplot2::aes(y=pred), fill="grey", 
+                                   size = 6, shape = 21) +
+               ggplot2::scale_color_gradient(guide = F,
+                                             low=other_col, high=r_col) +
+               ggplot2::scale_y_continuous(breaks=seq(0,100,25), labels=paste0(seq(0,100,25), "%")) +
+               ggplot2::scale_size_continuous(guide = FALSE, range = c(2,6)) +
+               ggplot2::labs(title = "The original study",
+                             y = "% forms with /r/", 
+                             x = "\n") +
+               theme_rough +
+               ggplot2::theme(plot.margin = unit(c(0.4,0.4,-0.6,0.4),"cm"), plot.title = element_text(hjust = 0.5)) + 
+               NULL,
+             
+             ggplot2::ggplot(data = r_per_family_revision, aes(x = Meaning.f, y = perc_r)) + # revised
+               ggplot2::facet_grid(. ~ Trill) +
+               ggplot2::geom_point(data=r_per_family_revision, 
+                                   ggplot2::aes(color = perc_r, size = n), alpha = 0.5,
+                                   position = ggbeeswarm::position_quasirandom(width = 0.3)) +
+               ggplot2::geom_errorbar(data=mod_dat_revision,
+                                      ggplot2::aes(ymin = ll, ymax = ul, y=NULL), 
+                                      width = 0.075) +
+               ggplot2::geom_point(data=mod_dat_revision, 
+                                   ggplot2::aes(y=pred), fill="grey", 
+                                   size = 6, shape = 21) +
+               ggplot2::scale_color_gradient(guide = F,
+                                             low=other_col, high=r_col) +
+               ggplot2::scale_y_continuous(breaks=seq(0,100,25), labels=paste0(seq(0,100,25), "%")) +
+               ggplot2::scale_size_continuous(guide = FALSE, range = c(2,6)) +
+               ggplot2::labs(title = "Using the recoding",
+                             y = "% forms with /r/", 
+                             x = "\n") +
+               theme_rough +
+               ggplot2::theme(plot.margin = unit(c(0.4,0.4,-0.6,0.4),"cm"), plot.title = element_text(hjust = 0.5)) + 
+               NULL,
+             
+             ggplot(posterior_diff %>%
+                      mutate(trill = factor(ifelse(trill=="trill", "trilled /r/", "other"), levels=c("trilled /r/", "other"))),
+                    aes(x=diff, fill=study)) + 
+               geom_density(color="black", alpha=0.25) + 
+               geom_vline(xintercept=c(-0.25, 0.00, 0.25, 0.50), color="gray50", linetype=c("dashed", "solid", "dashed", "dashed", "dashed", "solid", "dashed", "dashed"), size=0.25) +
+               facet_wrap(trill ~ .) +
+               ggplot2::labs(title = 'p(/r/ | "rough") - p(/r/ | "smooth")',
+                             y = "density\n\n", 
+                             x = "") +
+               #xlab("Δ probability of /r/ ('rough' - 'smooth')") +
+               scale_fill_manual(values=c("original"="blue", "recoding"="yellow")) + theme_rough + 
+               theme(legend.position="none", 
+                     plot.title = element_text(hjust = 0.5)) + 
+               NULL,
+             
+             ncol=1);
+dev.off();
+
+tiff("./figures/Figure2.tif",  width=5, height=7, units="in", res=600, compression="lzw", type="cairo", bg="white");
+grid.arrange(ggplot2::ggplot(data = r_per_family, ggplot2::aes(x = Meaning.f, y = perc_r)) + # @winter_trilled_2022
+               ggplot2::facet_grid(. ~ Trill) +
+               ggplot2::geom_point(data=r_per_family, 
+                                   ggplot2::aes(color = perc_r, size = n), alpha = 0.5,
+                                   position = ggbeeswarm::position_quasirandom(width = 0.3)) +
+               ggplot2::geom_errorbar(data=mod_dat,
+                                      ggplot2::aes(ymin = ll, ymax = ul, y=NULL), 
+                                      width = 0.075) +
+               ggplot2::geom_point(data=mod_dat, 
+                                   ggplot2::aes(y=pred), fill="grey", 
+                                   size = 6, shape = 21) +
+               ggplot2::scale_color_gradient(guide = F,
+                                             low=other_col, high=r_col) +
+               ggplot2::scale_y_continuous(breaks=seq(0,100,25), labels=paste0(seq(0,100,25), "%")) +
+               ggplot2::scale_size_continuous(guide = FALSE, range = c(2,6)) +
+               ggplot2::labs(title = "The original study",
+                             y = "% forms with /r/", 
+                             x = "\n") +
+               theme_rough +
+               ggplot2::theme(plot.margin = unit(c(0.4,0.4,-0.6,0.4),"cm"), plot.title = element_text(hjust = 0.5)) + 
+               NULL,
+             
+             ggplot2::ggplot(data = r_per_family_revision, aes(x = Meaning.f, y = perc_r)) + # revised
+               ggplot2::facet_grid(. ~ Trill) +
+               ggplot2::geom_point(data=r_per_family_revision, 
+                                   ggplot2::aes(color = perc_r, size = n), alpha = 0.5,
+                                   position = ggbeeswarm::position_quasirandom(width = 0.3)) +
+               ggplot2::geom_errorbar(data=mod_dat_revision,
+                                      ggplot2::aes(ymin = ll, ymax = ul, y=NULL), 
+                                      width = 0.075) +
+               ggplot2::geom_point(data=mod_dat_revision, 
+                                   ggplot2::aes(y=pred), fill="grey", 
+                                   size = 6, shape = 21) +
+               ggplot2::scale_color_gradient(guide = F,
+                                             low=other_col, high=r_col) +
+               ggplot2::scale_y_continuous(breaks=seq(0,100,25), labels=paste0(seq(0,100,25), "%")) +
+               ggplot2::scale_size_continuous(guide = FALSE, range = c(2,6)) +
+               ggplot2::labs(title = "Using the recoding",
+                             y = "% forms with /r/", 
+                             x = "\n") +
+               theme_rough +
+               ggplot2::theme(plot.margin = unit(c(0.4,0.4,-0.6,0.4),"cm"), plot.title = element_text(hjust = 0.5)) + 
+               NULL,
+             
+             ggplot(posterior_diff %>%
+                      mutate(trill = factor(ifelse(trill=="trill", "trilled /r/", "other"), levels=c("trilled /r/", "other"))),
+                    aes(x=diff, fill=study)) + 
+               geom_density(color="black", alpha=0.25) + 
+               geom_vline(xintercept=c(-0.25, 0.00, 0.25, 0.50), color="gray50", linetype=c("dashed", "solid", "dashed", "dashed", "dashed", "solid", "dashed", "dashed"), size=0.25) +
+               facet_wrap(trill ~ .) +
+               ggplot2::labs(title = 'p(/r/ | "rough") - p(/r/ | "smooth")',
+                             y = "density\n\n", 
+                             x = "") +
+               #xlab("Δ probability of /r/ ('rough' - 'smooth')") +
+               scale_fill_manual(values=c("original"="blue", "recoding"="yellow")) + theme_rough + 
+               theme(legend.position="none", 
+                     plot.title = element_text(hjust = 0.5)) + 
+               NULL,
+             
+             ncol=1);
+dev.off();
+
+## -----------------------------------------------------------------------------
+xling_brm_omnibus_mod_r_revision_results$original$hypotheses;
+
+## -----------------------------------------------------------------------------
+xling_brm_omnibus_mod_r_revision_results$noint$hypotheses;
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_omnibus_mod_r_revision_results$notrill$summary,sep="\n"));
+
+## -----------------------------------------------------------------------------
+xling_brm_omnibus_mod_r_revision_results$notrill$hypotheses;
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_omnibus_mod_r_revision_results$notrill$probs_text,sep="\n"));
+
+## ----results='hide', warning=FALSE, message=FALSE-----------------------------
+file_name <- "./cached/xling_replic_omnibus_mgn.RData";
+if( !file.exists(file_name) )
+{
+  # cache these results:
+  
+  ## Redo the same thing but using MGN's priors:
+  # setting the priors:
+  b1_priors_mgn <- c(
+    brms::set_prior("normal(0, 3)", class = "b"),
+    brms::set_prior("normal(0, 3)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Trillyes", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes:Trillyes", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Area"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Trillyes", group="Area"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes:Trillyes", group="Area")
+  ); # for the full model
+  # prior predictive checks:
+  set.seed(314); # for replicability
+  b_prior_mgn <- brms::brm(r ~ 1 + rough * Trill +
+                         (1 + rough * Trill | Family) +
+                         (1 + rough * Trill | Area),
+                       data=data_full_revised,
+                       prior=b1_priors_mgn,
+                       family="bernoulli",
+                       sample_prior='only',  # needed for prior predictive checks
+                       cores=brms_ncores, seed=314);
+  # save the results we need later on:
+  plot_prefix <- "./figures/xling_brm_omnibus_mod_r_revision_mgn";
+  g <- arrangeGrob(pp_check(b_prior_mgn, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Prior predictive distribution of minimum values'),
+                   pp_check(b_prior_mgn, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Prior predictive distribution of means'),
+                   pp_check(b_prior_mgn, type='stat', stat='max') + xlab('p(r)') + ggtitle('Prior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min, even if the mean is a bit off but not much)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_prior_predictive_checks.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  # fit the logistic model:
+  set.seed(314); # for replicability
+  b1_mgn <- brms::brm(r ~ 1 + rough * Trill +
+                         (1 + rough * Trill | Family) +
+                         (1 + rough * Trill | Area),
+                       data=data_full_revised,
+                  prior=b1_priors_mgn,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), seed=314); # adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b1_mgn); mcmc_plot(b1_mgn, type="trace"); mcmc_plot(b1_mgn);
+  (hyps_full_mgn <- brms::hypothesis(b1_mgn, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0", "roughyes:Trillyes = 0")));
+  (hdi95_full_mgn <- hdi(b1_mgn, ci=0.95));
+  m_full_mgn <- b1_mgn;
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_full_mgn <- "./figures/xling_brm_omnibus_mod_r_revision_full_mgn";
+  mcmc_plot(b1_mgn, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b1_mgn); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b1_mgn, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_full_mgn <- capture.output(summary(b1_mgn));
+  probs_text_full_mgn <- capture.output(probs_full_mgn <- logistic_summary(b1_mgn, dat=data_full_revised, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b1_mgn, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b1_mgn, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1_mgn, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1_mgn, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+
+  # model comparison with the null model:
+  b0_priors_mgn <- c(
+    brms::set_prior("normal(0, 3)", class = "Intercept"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Area")
+  ); # for the null model
+  b0_mgn <- brms::brm(r ~ 1 +
+                    (1 | Family) +
+                    (1 | Area),
+                  data=data_full_revised ,
+                  prior=b0_priors_mgn,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b0_mgn); 
+  mcmc_plot(b0_mgn, type="trace"); 
+  mcmc_plot(b0_mgn);
+  b0_mgn <- brms_fit_indices(b0_mgn);
+  m_full_mgn <- brms_fit_indices(m_full_mgn);
+  (modcmp_0_full_mgn <- brms_compare_models(b0_mgn, m_full_mgn, "[null]", "[full]", bayes_factor=brms_bayes_factors)); # full is better than null
+
+
+  ## following @winter_trilled_2022 observation "When the same model is fitted without by-Family random slopes over Trill, essentially the same results are obtained, but with narrower credible intervals" we also fit a model without these:
+  b2_priors_mgn <- c(
+    set_prior("normal(0, 3)", class = "b"),
+    set_prior("normal(0, 3)", class = "Intercept"),
+    set_prior("lkj(2)", class = "cor"),
+    set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Family"),
+    set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Family"),
+    set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Area"),
+    set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Area"),
+    set_prior("exponential(4)", class = "sd", coef = "Trillyes", group="Area"),
+    set_prior("exponential(4)", class = "sd", coef = "roughyes:Trillyes", group="Area")
+  ); # for the full model
+  # prior predictive checks:
+  set.seed(314); # for replicability
+  plot_prefix <- plot_prefix_original_mgn <- "./figures/xling_brm_omnibus_mod_r_revision_original_mgn";
+  b_prior_mgn <- brms::brm(r ~ 1 + rough * Trill +
+                         (1 + rough | Family) +
+                         (1 + rough * Trill | Area),
+                       data=data_full_revised,
+                       prior=b2_priors_mgn,
+                       family="bernoulli",
+                       sample_prior='only',  # needed for prior predictive checks
+                       cores=brms_ncores, seed=314);
+  g <- arrangeGrob(pp_check(b_prior_mgn, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Prior predictive distribution of minimum values'),
+                   pp_check(b_prior_mgn, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Prior predictive distribution of means'),
+                   pp_check(b_prior_mgn, type='stat', stat='max') + xlab('p(r)') + ggtitle('Prior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min, even if the mean is a bit off but not much)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_prior_predictive_checks.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  set.seed(314); # for replicability
+  b2_mgn <- brms::brm(r ~ 1 + rough * Trill +
+                    (1 + rough | Family) +
+                    (1 + rough * Trill | Area),
+                  data=data_full_revised,
+                  prior=b2_priors_mgn,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b2_mgn); mcmc_plot(b2_mgn, type="trace"); mcmc_plot(b2_mgn);
+  (hyps_original_mgn <- brms::hypothesis(b2_mgn, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0", "roughyes:Trillyes = 0")));
+  (hdi95_original_mgn <- hdi(b2_mgn, ci=0.95));
+  m_original_mgn <- b2_mgn;
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_original_mgn <- "./figures/xling_brm_omnibus_mod_r_revision_original_mgn";
+  mcmc_plot(b2_mgn, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b2_mgn); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b2_mgn, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_original_mgn <- capture.output(summary(b2_mgn));
+  probs_text_original_mgn <- capture.output(probs_original_mgn <- logistic_summary(b2_mgn, dat=data_full_revised, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b2_mgn, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b2_mgn, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b2_mgn, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b2_mgn, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  # model comparisons
+  m_original_mgn <- brms_fit_indices(m_original_mgn);
+  (modcmp_0_original_mgn <- brms_compare_models(b0_mgn, m_original_mgn, "[null]", "[original]", bayes_factor=brms_bayes_factors)); # original is better than null
+  (modcmp_full_original_mgn <- brms_compare_models(m_full_mgn, m_original_mgn, "[full]", "[original]", bayes_factor=brms_bayes_factors)); # pretty much equivalent
+  # ---> so we'll use the "original" here just as @winter_trilled_2022 suggest...
+
+  
+  ## check if Trill:rough really matters (because it seems it might not):
+  b3_priors_mgn <- c(
+    set_prior("normal(0, 3)", class = "b"),
+    set_prior("normal(0, 3)", class = "Intercept"),
+    set_prior("lkj(2)", class = "cor"),
+    set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Family"),
+    set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Family"),
+    set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Area"),
+    set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Area"),
+    set_prior("exponential(4)", class = "sd", coef = "Trillyes", group="Area")
+  ); # for the full model
+  set.seed(314); # for replicability
+  b3_mgn <- brms::brm(r ~ 1 + rough + Trill +
+                         (1 + rough | Family) +
+                         (1 + rough + Trill | Area),
+                       data=data_full_revised,
+                  prior=b3_priors_mgn,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b3_mgn); mcmc_plot(b3_mgn, type="trace"); mcmc_plot(b3_mgn);
+  (hyps_noint_mgn <- brms::hypothesis(b3_mgn, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0")));
+  (hdi95_noint_mgn <- hdi(b3_mgn, ci=0.95));
+  m_noint_mgn <- b3_mgn;
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_noint_mgn <- "./figures/xling_brm_omnibus_mod_r_revision_noint_mgn";
+  mcmc_plot(b3_mgn, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b3_mgn); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b3_mgn, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_noint_mgn <- capture.output(summary(b3_mgn));
+  probs_text_noint_mgn <- capture.output(probs_noint_mgn <- logistic_summary(b3_mgn, dat=data_full_revised, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b3_mgn, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b3_mgn, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b3_mgn, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b3_mgn, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  # model comparisons
+  m_noint_mgn <- brms_fit_indices(m_noint_mgn);
+  (modcmp_0_noint_mgn <- brms_compare_models(b0_mgn, m_noint_mgn, "[null]", "[noint]", bayes_factor=brms_bayes_factors)); # noint is better than null
+  (modcmp_full_noint_mgn <- brms_compare_models(m_full_mgn, m_noint_mgn, "[full]", "[noint]", bayes_factor=brms_bayes_factors)); # noint is equivalent to full
+  (modcmp_original_noint_mgn <- brms_compare_models(m_original_mgn, m_noint_mgn, "[original]", "[noint]", bayes_factor=brms_bayes_factors)); # noint is equivalent to original
+  # -> so we can remove the interaction Trill:rough...
+
+
+  # check if Trill is needed at all (because it seems it might not):
+  b4_priors_mgn <- c(
+    set_prior("normal(0, 3)", class = "b"),
+    set_prior("normal(0, 3)", class = "Intercept"),
+    set_prior("lkj(2)", class = "cor"),
+    set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Family"),
+    set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Family"),
+    set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Area"),
+    set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Area")
+  ); # no Trill
+  set.seed(314); # for replicability
+  b4_mgn <- brms::brm(r ~ 1 + rough +
+                    (1 + rough | Family) +
+                    (1 + rough | Area),
+                  data=data_full_revised,
+                  prior=b4_priors_mgn,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), seed=314); # adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b4_mgn); mcmc_plot(b4_mgn, type="trace"); mcmc_plot(b4_mgn);
+  (hyps_notrill_mgn <- brms::hypothesis(b4_mgn, c("roughyes = 0", "roughyes > 0")));
+  (hdi95_notrill_mgn <- hdi(b4_mgn, ci=0.95));
+  m_notrill_mgn <- b4_mgn;
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_notrill_mgn <- "./figures/xling_brm_omnibus_mod_r_revision_notrill_mgn";
+  mcmc_plot(b4_mgn, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b4_mgn); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b4_mgn, type="pred", terms=c("rough")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_notrill_mgn <- capture.output(summary(b4_mgn));
+  probs_text_notrill_mgn <- capture.output(probs_notrill_mgn <- logistic_summary(b4_mgn, dat=data_full_revised, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b4_mgn, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b4_mgn, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b4_mgn, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b4_mgn, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  # model comparisons
+  m_notrill_mgn <- brms_fit_indices(m_notrill_mgn);
+  (modcmp_0_notrill_mgn <- brms_compare_models(b0_mgn, m_notrill_mgn, "[null]", "[notrill]", bayes_factor=brms_bayes_factors)); # notrill is better than null
+  (modcmp_full_notrill_mgn <- brms_compare_models(m_full_mgn, m_notrill_mgn, "[full]", "[notrill]", bayes_factor=brms_bayes_factors)); # notrill is better than full
+  (modcmp_original_notrill_mgn <- brms_compare_models(m_original_mgn, m_notrill_mgn, "[original]", "[notrill]", bayes_factor=brms_bayes_factors)); # notrill is better than the original
+  (modcmp_noint_notrill_mgn <- brms_compare_models(m_noint_mgn, m_notrill_mgn, "[noint]", "[notrill]", bayes_factor=brms_bayes_factors)); # notrill is better than noint
+  # -> so, Trill is not needed at all...
+
+  
+  xling_brm_omnibus_mod_r_revision_mgn_results <- list("full"=list("model"=NULL, # needed for later comparisons
+                                                                   "summary"=summary_mod_full_mgn, "hypotheses"=hyps_full_mgn, "hdi95"=hdi95_full_mgn, 
+                                                                   "cmp_to_null"=modcmp_0_full_mgn, "probs"=probs_full_mgn, "probs_text"=probs_text_full_mgn, "plot_prefix"=plot_prefix_full_mgn),
+                                                       "original"=list("model"=NULL, # needed for later comparisons
+                                                                       "summary"=summary_mod_original_mgn, "hypotheses"=hyps_original_mgn, "hdi95"=hdi95_original_mgn, 
+                                                                       "cmp_to_null"=modcmp_0_original_mgn,  "cmp_to_full"=modcmp_full_original_mgn, "probs"=probs_original_mgn, "probs_text"=probs_text_original_mgn, "plot_prefix"=plot_prefix_original_mgn),
+                                                       "noint"=list("model"=NULL, #m_noint, # needed for later comparisons
+                                                                    "summary"=summary_mod_noint_mgn, "hypotheses"=hyps_noint_mgn, "hdi95"=hdi95_noint_mgn, 
+                                                                    "cmp_to_null"=modcmp_0_noint_mgn,  "cmp_to_full"=modcmp_full_noint_mgn, "cmp_to_original"=modcmp_original_noint_mgn, "probs"=probs_noint_mgn, "probs_text"=probs_text_noint_mgn, "plot_prefix"=plot_prefix_noint_mgn),
+                                                       "notrill"=list("model"=NULL, #m_notrill, # needed for later comparisons
+                                                                      "summary"=summary_mod_notrill_mgn, "hypotheses"=hyps_notrill_mgn, "hdi95"=hdi95_notrill_mgn, 
+                                                                      "cmp_to_null"=modcmp_0_notrill_mgn,  "cmp_to_full"=modcmp_full_notrill_mgn, "cmp_to_original"=modcmp_original_notrill_mgn, "cmp_to_noint"=modcmp_noint_notrill_mgn, 
+                                                                      "probs"=probs_notrill_mgn, "probs_text"=probs_text_notrill_mgn, "plot_prefix"=plot_prefix_notrill_mgn));
+  
+  # save the results we need later on:
+  save(xling_brm_omnibus_mod_r_revision_mgn_results, 
+       file=file_name, compress="xz", compression_level=9); # save this model
+} else
+{
+  load(file_name);
+}
+
+## -----------------------------------------------------------------------------
+xling_brm_omnibus_mod_r_revision_mgn_results$noint$hypotheses;
+
+## -----------------------------------------------------------------------------
+cat(paste0(xling_brm_omnibus_mod_r_revision_mgn_results$notrill$summary,sep="\n"));
+
+## ----fig.width=5, fig.height=5, fig.cap=capFig("Histogram of the number of observations (i.e., words) per language in the revised omnibus dataset, also showing the percent of languages with a given number of observations.")----
+x <- as.numeric(table(data_full_revised$Language));
+h <- hist(x, plot=FALSE, breaks=max(x)-min(x)+1);
+hist(x, labels=ifelse(h$counts > 0, as.character(round(h$counts / length(x) * 100, 1)), ""), main=NULL, breaks=max(x)-min(x)+1, xaxt = "n", ylim=c(0,max(h$counts)+50), xlab="# of words per language");
+axis(1, min(x):(max(x)-1)+0.5, labels = min(x):(max(x)-1), tick = FALSE, las=3);
+
+## ----results='hide', warning=FALSE, message=FALSE-----------------------------
+file_name <- "./cached/xling_replic_withr_langrand.RData";
+if( !file.exists(file_name) )
+{
+  # cache these results:
+  
+  ## Frequentist ##
+  set.seed(314); # for replicability
+  try(m1 <- glmer(r ~ 1 + rough +
+                (1 + rough | Language) + # language is nested within families so no need to include their interaction
+                (1 + rough | Family) +
+                (1 + rough | Area),
+              data=data_r_revision_trill_rs_1,
+              family=binomial())); 
+  # Error: number of observations (=247) < number of random effects (=248) for term (1 + rough | Language); the random-effects parameters are probably unidentifiable
+  # so, we can't model this meaningfully in a frequentist way (and it also suggests that for the Bayesian approach, the prior might have too much influence)
+  
+  
+  ## Bayesian ##
+  # check the priors that we can set:
+  get_prior(r ~ 1 + rough +
+              (1 + rough | Language) + # language is nested within families so no need to include their interaction
+              (1 + rough | Family) +
+              (1 + rough | Area),
+            data=data_r_revision_trill_rs_1,
+            family="bernoulli");
+  # setting the priors:
+  b1_priors <- c(
+    brms::set_prior("student_t(5,0,2.5)", class = "b"),
+    brms::set_prior("student_t(5,0,2.5)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Language"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Area")
+  ); # for the full model
+  # prior predictive checks:
+  set.seed(314); # for replicability
+  b_prior <- brms::brm(r ~ 1 + rough +
+                         (1 + rough | Language) + # language is nested within families so no need to include their interaction
+                         (1 + rough | Family) +
+                         (1 + rough | Area),
+                       data=data_r_revision_trill_rs_1,
+                       prior=b1_priors,
+                       family="bernoulli",
+                       sample_prior='only',  # needed for prior predictive checks
+                       cores=brms_ncores, seed=314);
+  # save the results we need later on:
+  plot_prefix <- "./figures/xling_brm_rs_logistic_mod_r_revision_langrand";
+  g <- arrangeGrob(pp_check(b_prior, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Prior predictive distribution of minimum values'),
+                   pp_check(b_prior, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Prior predictive distribution of means'),
+                   pp_check(b_prior, type='stat', stat='max') + xlab('p(r)') + ggtitle('Prior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min, even if the mean is a bit off but not much)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_prior_predictive_checks.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  
+  # fit the logistic model:
+  set.seed(314); # for replicability
+  b1 <- brms::brm(r ~ 1 + rough +
+                    (1 + rough | Language) + # language is nested within families so no need to include their interaction
+                    (1 + rough | Family) +
+                    (1 + rough | Area),
+                  data=data_r_revision_trill_rs_1,
+                  prior=b1_priors,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314, iter=3000); # iter=3000 to address ESS too low
+  summary(b1); mcmc_plot(b1, type="trace"); mcmc_plot(b1);
+  (hyps <- brms::hypothesis(b1, c("roughyes = 0", "roughyes > 0")));
+  (hdi95 <- hdi(b1, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- "./figures/xling_brm_rs_logistic_mod_r_revision_langrand";
+  mcmc_plot(b1, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b1); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b1, type="pred", terms="rough"); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod <- capture.output(summary(b1));
+  probs_text <- capture.output(probs <- logistic_summary(b1, dat=data_r_revision_trill_rs_1, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b1, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b1, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  # model comparison with the null model:
+  b0_priors <- c(
+    brms::set_prior("student_t(5,0,2.5)", class = "Intercept"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Area")
+  ); # for the null model
+  b0 <- brms::brm(r ~ 1 +
+                    (1 | Language) +
+                    (1 | Family) +
+                    (1 | Area),
+                  data=data_r_revision_trill_rs_1,
+                  prior=b0_priors,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), seed=314); # adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b0); 
+  mcmc_plot(b0, type="trace"); 
+  mcmc_plot(b0);
+  b0 <- brms_fit_indices(b0);
+  b1 <- brms_fit_indices(b1, moment_match=TRUE, reloo=TRUE); # some issues: Error in validate_ll(log_ratios) + The model will be refit 3 times + Some Pareto k diagnostic values are too high + very slow...
+  (modcmp <- brms_compare_models(b0, b1, "[null]", "[+ 'rough']", bayes_factor=brms_bayes_factors));
+  # --> clear positive effect of 'rough'
+  
+  (modcmp2 <- brms_compare_models(xling_brm_rs_logistic_mod_r_revision_results$model, b1, "[original]", "[with Language]", bayes_factor=brms_bayes_factors)); # clear advantage for including Language
+  
+  
+  # compare with the default  priors (prior sensitivity check):
+  set.seed(314); # for replicability
+  b1f <- brms::brm(r ~ 1 + rough +
+                    (1 + rough | Language) + # language is nested within families so no need to include their interaction
+                    (1 + rough | Family) +
+                    (1 + rough | Area),
+                  data=data_r_revision_trill_rs_1,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b1f); mcmc_plot(b1f, type="trace"); mcmc_plot(b1f);
+  (hyps_f <- brms::hypothesis(b1f, c("roughyes = 0", "roughyes > 0")));
+  (hdi95_f <- hdi(b1f, ci=0.95));
+  pp_check(b1f, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay');
+  g <- arrangeGrob(pp_check(b1f, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1f, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1f, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g);
+  b1f <- brms_fit_indices(b1f, moment_match=TRUE, reloo=TRUE); # some issues: Error in validate_ll(log_ratios) + The model will be refit 17 times + Some Pareto k diagnostic values are too high + very slow...
+  (modcmp_f <- brms_compare_models(b1, b1f, "[custom prior]", "[default prior]", bayes_factor=brms_bayes_factors)); # the default prior seem better and the estimates are slightly different (smaller for the custom prior)
+  mcmc_plot(b1f); ggsave(paste0(plot_prefix,"_default_priors_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b1f, type="pred", terms="rough"); ggsave(paste0(plot_prefix,"_default_priors_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+
+  
+  # let's also use the MGN priors:
+  # setting the priors:
+  b1_priors_mgn <- c(
+    brms::set_prior("normal(0,3)", class = "b"),
+    brms::set_prior("normal(0,3)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Language"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Area")
+  ); # for the full model
+  # prior predictive checks:
+  set.seed(314); # for replicability
+  b_prior_mgn <- brms::brm(r ~ 1 + rough +
+                         (1 + rough | Language) + # language is nested within families so no need to include their interaction
+                         (1 + rough | Family) +
+                         (1 + rough | Area),
+                       data=data_r_revision_trill_rs_1,
+                       prior=b1_priors_mgn,
+                       family="bernoulli",
+                       sample_prior='only',  # needed for prior predictive checks
+                       cores=brms_ncores, seed=314);
+  # save the results we need later on:
+  plot_prefix_mgn <- "./figures/xling_brm_rs_logistic_mod_r_revision_langrand_mgn";
+  g <- arrangeGrob(pp_check(b_prior_mgn, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Prior predictive distribution of minimum values'),
+                   pp_check(b_prior_mgn, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Prior predictive distribution of means'),
+                   pp_check(b_prior_mgn, type='stat', stat='max') + xlab('p(r)') + ggtitle('Prior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min, even if the mean is a bit off but not much)
+  as_ggplot(g); ggsave(paste0(plot_prefix_mgn,"_prior_predictive_checks.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  
+  # fit the logistic model:
+  set.seed(314); # for replicability
+  b1_mgn <- brms::brm(r ~ 1 + rough +
+                    (1 + rough | Language) + # language is nested within families so no need to include their interaction
+                    (1 + rough | Family) +
+                    (1 + rough | Area),
+                  data=data_r_revision_trill_rs_1,
+                  prior=b1_priors_mgn,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), seed=314); # adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b1_mgn); mcmc_plot(b1_mgn, type="trace"); mcmc_plot(b1_mgn);
+  (hyps_mgn <- brms::hypothesis(b1_mgn, c("roughyes = 0", "roughyes > 0")));
+  (hdi95_mgn <- hdi(b1_mgn, ci=0.95));
+  # posterior predictive checks
+  plot_prefix_mgn <- "./figures/xling_brm_rs_logistic_mod_r_revision_langrand_mgn";
+  mcmc_plot(b1_mgn, type="trace"); ggsave(paste0(plot_prefix_mgn,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b1_mgn); ggsave(paste0(plot_prefix_mgn,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b1_mgn, type="pred", terms="rough"); ggsave(paste0(plot_prefix_mgn,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_mgn <- capture.output(summary(b1_mgn));
+  probs_text_mgn <- capture.output(probs_mgn <- logistic_summary(b1_mgn, dat=data_r_revision_trill_rs_1, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b1_mgn, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix_mgn,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b1_mgn, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1_mgn, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1_mgn, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix_mgn,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  # model comparison with the null model:
+  b0_priors_mgn <- c(
+    brms::set_prior("normal(0,3)", class = "Intercept"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Area")
+  ); # for the null model
+  b0_mgn <- brms::brm(r ~ 1 +
+                    (1 | Language) +
+                    (1 | Family) +
+                    (1 | Area),
+                  data=data_r_revision_trill_rs_1,
+                  prior=b0_priors_mgn,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b0_mgn); 
+  mcmc_plot(b0_mgn, type="trace"); 
+  mcmc_plot(b0_mgn);
+  b0_mgn <- brms_fit_indices(b0_mgn);
+  b1_mgn <- brms_fit_indices(b1_mgn);
+  (modcmp_mgn <- brms_compare_models(b0_mgn, b1_mgn, "[null]", "[+ 'rough']", bayes_factor=brms_bayes_factors));
+  # --> clear positive effect of 'rough'
+  
+  # model comparison with the model without Language:
+  b2_priors_mgn <- c(
+    brms::set_prior("normal(0,3)", class = "b"),
+    brms::set_prior("normal(0,3)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Area")
+  ); # for the original model
+  b2_mgn <- brms::brm(r ~ 1 + rough +
+                    (1 + rough | Family) +
+                    (1 + rough | Area),
+                  data=data_r_revision_trill_rs_1,
+                  prior=b2_priors_mgn,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), seed=314); # adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b2_mgn); mcmc_plot(b2_mgn, type="trace"); mcmc_plot(b2_mgn);
+  brms::hypothesis(b2_mgn, c("roughyes = 0", "roughyes > 0"));
+  hdi(b2_mgn, ci=0.95);
+  b2_mgn <- brms_fit_indices(b2_mgn);
+  (modcmp2_mgn <- brms_compare_models(b2_mgn, b1_mgn, "[original]", "[with Language]", bayes_factor=brms_bayes_factors)); # they seem equivalent
+
+  # Let's compare WSPD with MGN:
+  (modcmp_wspd_mgn <- brms_compare_models(b1, b1_mgn, "[wspd]", "[mgn]", bayes_factor=brms_bayes_factors)); # WSPD is better...
+  
+  
+  
+  xling_brm_rs_logistic_mod_r_revision_langrand_results <- list("model"=NULL, #xling_brm_rs_logistic_mod_r_revision, # needed for later comparisons
+                                                                "summary"=summary_mod, "hypotheses"=hyps, "hdi95"=hdi95, "cmp_to_null"=modcmp, "cmp_to_original"=modcmp2, 
+                                                                "probs"=probs, "probs_text"=probs_text, "plot_prefix"=plot_prefix,
+                                                                "default_priors_summary"=capture.output(summary(b1f)), 
+                                                                "default_priors_probs_text"=capture.output(probs <- logistic_summary(b1f, dat=data_r_revision_trill_rs_1, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE)),
+                                                                "cmp_to_default_priors"=modcmp_f,
+                                                                "mgn_summary"=summary_mod_mgn, "mgn_hypotheses"=hyps_mgn, "mgn_hdi95"=hdi95_mgn, "cmp_wspd_mgm"=modcmp_wspd_mgn);
+  save(xling_brm_rs_logistic_mod_r_revision_langrand_results,
+       file=file_name, compress="xz", compression_level=9); # save this model
+} else
+{
+  load(file_name);
+}
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_rs_logistic_mod_r_revision_langrand_results$summary,sep="\n"));
+
+## -----------------------------------------------------------------------------
+xling_brm_rs_logistic_mod_r_revision_langrand_results$hypotheses;
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_rs_logistic_mod_r_revision_langrand_results$probs_text,sep="\n"));
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_rs_logistic_mod_r_revision_langrand_results$default_priors_probs_text,sep="\n"));
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_rs_logistic_mod_r_revision_results$probs_text,sep="\n"));
+
+## -----------------------------------------------------------------------------
+cat(xling_brm_rs_logistic_mod_r_revision_langrand_results$mgn_summary, sep="\n");
+xling_brm_rs_logistic_mod_r_revision_langrand_results$mgn_hypotheses;
+
+## ----results='hide', warning=FALSE, message=FALSE-----------------------------
+file_name <- "./cached/xling_replic_withoutr_langrand.RData";
+if( !file.exists(file_name) )
+{
+  # cache these results:
+  
+  ## Frequentist ##
+  set.seed(314); # for replicability
+  try(m1 <- glmer(r ~ 1 + rough +
+                (1 + rough | Language) + # language is nested within families so no need to include their interaction
+                (1 + rough | Family) +
+                (1 + rough | Area),
+              data=data_r_revision_other_rs_1,
+              family=binomial())); 
+  # Error: number of observations (=254) < number of random effects (=264) for term (1 + rough | Language); the random-effects parameters are probably unidentifiable
+  # so, we can't model this meaningfully in a frequentist way (and it also suggests that for the Bayesian approach, the prior might have too much influence)
+  
+  
+  ## Bayesian ##
+  # check the priors that we can set:
+  get_prior(r ~ 1 + rough +
+              (1 + rough | Language) + # language is nested within families so no need to include their interaction
+              (1 + rough | Family) +
+              (1 + rough | Area),
+            data=data_r_revision_other_rs_1,
+            family="bernoulli");
+  # setting the priors:
+  b1_priors <- c(
+    brms::set_prior("student_t(5,0,2.5)", class = "b"),
+    brms::set_prior("student_t(5,0,2.5)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Language"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Area")
+  ); # for the full model
+  # prior predictive checks:
+  set.seed(314); # for replicability
+  b_prior <- brms::brm(r ~ 1 + rough +
+                         (1 + rough | Language) + # language is nested within families so no need to include their interaction
+                         (1 + rough | Family) +
+                         (1 + rough | Area),
+                       data=data_r_revision_other_rs_1,
+                       prior=b1_priors,
+                       family="bernoulli",
+                       sample_prior='only',  # needed for prior predictive checks
+                       cores=brms_ncores, seed=314);
+  # save the results we need later on:
+  plot_prefix <- "./figures/xling_brm_rs_logistic_mod_o_revision_langrand_results";
+  g <- arrangeGrob(pp_check(b_prior, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Prior predictive distribution of minimum values'),
+                   pp_check(b_prior, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Prior predictive distribution of means'),
+                   pp_check(b_prior, type='stat', stat='max') + xlab('p(r)') + ggtitle('Prior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min, even if the mean is a bit off but not much)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_prior_predictive_checks.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  
+  # fit the logistic model:
+  set.seed(314); # for replicability
+  b1 <- brms::brm(r ~ 1 + rough +
+                    (1 + rough | Language) + # language is nested within families so no need to include their interaction
+                    (1 + rough | Family) +
+                    (1 + rough | Area),
+                  data=data_r_revision_other_rs_1,
+                  prior=b1_priors,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b1); mcmc_plot(b1, type="trace"); mcmc_plot(b1);
+  (hyps <- brms::hypothesis(b1, c("roughyes = 0", "roughyes > 0")));
+  (hdi95 <- hdi(b1, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- "./figures/xling_brm_rs_logistic_mod_o_revision_langrand_results";
+  mcmc_plot(b1, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b1); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b1, type="pred", terms="rough"); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod <- capture.output(summary(b1));
+  probs_text <- capture.output(probs <- logistic_summary(b1, dat=data_r_revision_other_rs_1, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b1, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b1, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  # model comparison with the null model:
+  b0_priors <- c(
+    brms::set_prior("student_t(5,0,2.5)", class = "Intercept"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Area")
+  ); # for the null model
+  b0 <- brms::brm(r ~ 1 +
+                    (1 | Language) +
+                    (1 | Family) +
+                    (1 | Area),
+                  data=data_r_revision_other_rs_1,
+                  prior=b0_priors,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b0); 
+  mcmc_plot(b0, type="trace"); 
+  mcmc_plot(b0);
+  b0 <- brms_fit_indices(b0);
+  b1 <- brms_fit_indices(b1, moment_match=TRUE);
+  (modcmp <- brms_compare_models(b0, b1, "[null]", "[+ 'rough']", bayes_factor=brms_bayes_factors));
+  # --> positive effect of 'rough' (but less strong than for the languages with "r")
+
+  (modcmp2 <- brms_compare_models(xling_brm_rs_logistic_mod_o_revision_results$model, b1, "[original]", "[with Language]", bayes_factor=brms_bayes_factors)); # quite similar
+  
+  
+  # compare with the default  priors (prior sensitivity check):
+  set.seed(314); # for replicability
+  b1f <- brms::brm(r ~ 1 + rough +
+                    (1 + rough | Language) + # language is nested within families so no need to include their interaction
+                    (1 + rough | Family) +
+                    (1 + rough | Area),
+                  data=data_r_revision_other_rs_1,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), seed=314); # adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b1f); mcmc_plot(b1f, type="trace"); mcmc_plot(b1f);
+  (hyps_f <- brms::hypothesis(b1f, c("roughyes = 0", "roughyes > 0")));
+  (hdi95_f <- hdi(b1f, ci=0.95));
+  pp_check(b1f, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay');
+  g <- arrangeGrob(pp_check(b1f, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1f, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1f, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g);
+  b1f <- brms_fit_indices(b1f, moment_match=TRUE);
+  (modcmp_f <- brms_compare_models(b1, b1f, "[custom prior]", "[default prior]", bayes_factor=brms_bayes_factors)); # they seem equivalent
+  mcmc_plot(b1f); ggsave(paste0(plot_prefix,"_default_priors_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b1f, type="pred", terms="rough"); ggsave(paste0(plot_prefix,"_default_priors_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  
+  
+  # let's also use the MGN priors:
+  # setting the priors:
+  b1_priors_mgn <- c(
+    brms::set_prior("normal(0,3)", class = "b"),
+    brms::set_prior("normal(0,3)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Language"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Area")
+  ); # for the full model
+  # prior predictive checks:
+  set.seed(314); # for replicability
+  b_prior_mgn <- brms::brm(r ~ 1 + rough +
+                         (1 + rough | Language) + # language is nested within families so no need to include their interaction
+                         (1 + rough | Family) +
+                         (1 + rough | Area),
+                       data=data_r_revision_other_rs_1,
+                       prior=b1_priors_mgn,
+                       family="bernoulli",
+                       sample_prior='only',  # needed for prior predictive checks
+                       cores=brms_ncores, seed=314);
+  # save the results we need later on:
+  plot_prefix_mgn <- "./figures/xling_brm_rs_logistic_mod_o_revision_langrand_mgn";
+  g <- arrangeGrob(pp_check(b_prior_mgn, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Prior predictive distribution of minimum values'),
+                   pp_check(b_prior_mgn, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Prior predictive distribution of means'),
+                   pp_check(b_prior_mgn, type='stat', stat='max') + xlab('p(r)') + ggtitle('Prior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min, even if the mean is a bit off but not much)
+  as_ggplot(g); ggsave(paste0(plot_prefix_mgn,"_prior_predictive_checks.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  
+  # fit the logistic model:
+  set.seed(314); # for replicability
+  b1_mgn <- brms::brm(r ~ 1 + rough +
+                    (1 + rough | Language) + # language is nested within families so no need to include their interaction
+                    (1 + rough | Family) +
+                    (1 + rough | Area),
+                  data=data_r_revision_other_rs_1,
+                  prior=b1_priors_mgn,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b1_mgn); mcmc_plot(b1_mgn, type="trace"); mcmc_plot(b1_mgn);
+  (hyps_mgn <- brms::hypothesis(b1_mgn, c("roughyes = 0", "roughyes > 0")));
+  (hdi95_mgn <- hdi(b1_mgn, ci=0.95));
+  # posterior predictive checks
+  plot_prefix_mgn <- "./figures/xling_brm_rs_logistic_mod_o_revision_langrand_mgn";
+  mcmc_plot(b1_mgn, type="trace"); ggsave(paste0(plot_prefix_mgn,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b1_mgn); ggsave(paste0(plot_prefix_mgn,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b1_mgn, type="pred", terms="rough"); ggsave(paste0(plot_prefix_mgn,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_mgn <- capture.output(summary(b1_mgn));
+  probs_text_mgn <- capture.output(probs_mgn <- logistic_summary(b1_mgn, dat=data_r_revision_other_rs_1, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b1_mgn, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix_mgn,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b1_mgn, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1_mgn, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1_mgn, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix_mgn,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  # model comparison with the null model:
+  b0_priors_mgn <- c(
+    brms::set_prior("normal(0,3)", class = "Intercept"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Area")
+  ); # for the null model
+  b0_mgn <- brms::brm(r ~ 1 +
+                    (1 | Language) +
+                    (1 | Family) +
+                    (1 | Area),
+                  data=data_r_revision_other_rs_1,
+                  prior=b0_priors_mgn,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b0_mgn); 
+  mcmc_plot(b0_mgn, type="trace"); 
+  mcmc_plot(b0_mgn);
+  b0_mgn <- brms_fit_indices(b0_mgn);
+  b1_mgn <- brms_fit_indices(b1_mgn);
+  (modcmp_mgn <- brms_compare_models(b0_mgn, b1_mgn, "[null]", "[+ 'rough']", bayes_factor=brms_bayes_factors));
+  # --> clear positive effect of 'rough'
+  
+  # model comparison with the model without Language:
+  b2_priors_mgn <- c(
+    brms::set_prior("normal(0,3)", class = "b"),
+    brms::set_prior("normal(0,3)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Area")
+  ); # for the original model
+  b2_mgn <- brms::brm(r ~ 1 + rough +
+                    (1 + rough | Family) +
+                    (1 + rough | Area),
+                  data=data_r_revision_other_rs_1,
+                  prior=b2_priors_mgn,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b2_mgn); mcmc_plot(b2_mgn, type="trace"); mcmc_plot(b2_mgn);
+  brms::hypothesis(b2_mgn, c("roughyes = 0", "roughyes > 0"));
+  hdi(b2_mgn, ci=0.95);
+  b2_mgn <- brms_fit_indices(b2_mgn);
+  (modcmp2_mgn <- brms_compare_models(b2_mgn, b1_mgn, "[original]", "[with Language]", bayes_factor=brms_bayes_factors)); # with Language seems slightly better
+
+  # Let's compare WSPD with MGN:
+  (modcmp_wspd_mgn <- brms_compare_models(b1, b1_mgn, "[wspd]", "[mgn]", bayes_factor=brms_bayes_factors)); # they seem more or less equivalent
+
+  
+  xling_brm_rs_logistic_mod_o_revision_langrand_results <- list("model"=NULL, #xling_brm_rs_logistic_mod_r_revision, # needed for later comparisons
+                                                                "summary"=summary_mod, "hypotheses"=hyps, "hdi95"=hdi95, "cmp_to_null"=modcmp, "cmp_to_original"=modcmp2, 
+                                                                "probs"=probs, "probs_text"=probs_text, "plot_prefix"=plot_prefix,
+                                                                "default_priors_summary"=capture.output(summary(b1f)), 
+                                                                "default_priors_probs_text"=capture.output(probs <- logistic_summary(b1f, dat=data_r_revision_trill_rs_1, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE)),
+                                                                "cmp_to_default_priors"=modcmp_f,
+                                                                "mgn_summary"=summary_mod_mgn, "mgn_hypotheses"=hyps_mgn, "mgn_hdi95"=hdi95_mgn, "cmp_wspd_mgm"=modcmp_wspd_mgn);
+  save(xling_brm_rs_logistic_mod_o_revision_langrand_results,
+       file=file_name, compress="xz", compression_level=9); # save this model
+} else
+{
+  load(file_name);
+}
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_rs_logistic_mod_o_revision_langrand_results$summary,sep="\n"));
+
+## -----------------------------------------------------------------------------
+xling_brm_rs_logistic_mod_o_revision_langrand_results$hypotheses;
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_rs_logistic_mod_o_revision_langrand_results$probs_text,sep="\n"));
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_rs_logistic_mod_o_revision_langrand_results$default_priors_probs_text,sep="\n"));
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_rs_logistic_mod_o_revision_results$probs_text,sep="\n"));
+
+## -----------------------------------------------------------------------------
+cat(xling_brm_rs_logistic_mod_o_revision_langrand_results$mgn_summary, sep="\n");
+xling_brm_rs_logistic_mod_o_revision_langrand_results$mgn_hypotheses;
+
+## ----results='hide', warning=FALSE, message=FALSE-----------------------------
+file_name <- "./cached/xling_replic_omnibus_langrand.RData";
+if( !file.exists(file_name) )
+{
+  # cache these results:
+  
+  ## Frequentist ##
+  set.seed(314); # for replicability
+  try(m1 <- glmer(r ~ 1 + rough * Trill +
+                (1 + rough * Trill | Language) +
+                (1 + rough * Trill | Family) +
+                (1 + rough * Trill | Area),
+              data=data_full_revised,
+              family=binomial())); 
+  # Error: number of observations (=501) < number of random effects (=1024) for term (1 + rough * Trill | Language); the random-effects parameters are probably unidentifiable
+  # so, we can't model this meaningfully in a frequentist way (and it also suggests that for the Bayesian approach, the prior might have too much influence)
+  
+  
+  ## Bayesian ##
+  # check the priors that we can set:
+  get_prior(r ~ 1 + rough * Trill +
+              (1 + rough * Trill | Language) +
+              (1 + rough * Trill | Family) +
+              (1 + rough * Trill | Area),
+            data=data_full_revised,
+            family="bernoulli");
+  # setting the priors:
+  b1_priors <- c(
+    brms::set_prior("student_t(5,0,2.5)", class = "b"),
+    brms::set_prior("student_t(5,0,2.5)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Language"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Trillyes", group="Language"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes:Trillyes", group="Language"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Trillyes", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes:Trillyes", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Area"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Trillyes", group="Area"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes:Trillyes", group="Area")
+  ); # for the full model
+  # prior predictive checks:
+  set.seed(314); # for replicability
+  b_prior <- brms::brm(r ~ 1 + rough * Trill +
+                         (1 + rough * Trill | Language) +
+                         (1 + rough * Trill | Family) +
+                         (1 + rough * Trill | Area),
+                       data=data_full_revised,
+                       prior=b1_priors,
+                       family="bernoulli",
+                       sample_prior='only',  # needed for prior predictive checks
+                       cores=brms_ncores, seed=314);
+  # save the results we need later on:
+  plot_prefix <- "./figures/xling_brm_omnibus_mod_r_revision_langrand_full";
+  g <- arrangeGrob(pp_check(b_prior, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Prior predictive distribution of minimum values'),
+                   pp_check(b_prior, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Prior predictive distribution of means'),
+                   pp_check(b_prior, type='stat', stat='max') + xlab('p(r)') + ggtitle('Prior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min, even if the mean is a bit off but not much)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_prior_predictive_checks.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  # fit the logistic model:
+  set.seed(314); # for replicability
+  b1 <- brms::brm(r ~ 1 + rough * Trill +
+                    (1 + rough * Trill | Language) +
+                    (1 + rough * Trill | Family) +
+                    (1 + rough * Trill | Area),
+                  data=data_full_revised,
+                  prior=b1_priors,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, iter=3000, seed=314); # iter=3000 needed to avoid ESS being too low
+  summary(b1); mcmc_plot(b1, type="trace"); mcmc_plot(b1);
+  (hyps_full <- brms::hypothesis(b1, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0", "roughyes:Trillyes = 0")));
+  (hdi95_full <- hdi(b1, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_full <- "./figures/xling_brm_omnibus_mod_r_revision_langrand_full";
+  mcmc_plot(b1, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b1); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b1, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_full <- capture.output(summary(b1));
+  probs_text_full <- capture.output(probs_full <- logistic_summary(b1, dat=data_full_revised, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b1, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b1, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  b1 <- brms_fit_indices(b1, moment_match=TRUE);
+  m_full <- b1;
+  
+  # model comparison with the null model:
+  b0_priors <- c(
+    brms::set_prior("student_t(5,0,2.5)", class = "Intercept"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Area")
+  ); # for the null model
+  b0 <- brms::brm(r ~ 1 +
+                    (1 | Language) +
+                    (1 | Family) +
+                    (1 | Area),
+                  data=data_full_revised,
+                  prior=b0_priors,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), seed=314); # adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b0); 
+  mcmc_plot(b0, type="trace"); 
+  mcmc_plot(b0);
+  b0 <- brms_fit_indices(b0);
+  (modcmp_0_full <- brms_compare_models(b0, m_full, "[null]", "[full]", bayes_factor=brms_bayes_factors)); # full is better than null
+
+
+  # following @winter_trilled_2022 observation "When the same model is fitted without by-Family random slopes over Trill, essentially the same results are obtained, but with narrower credible intervals" we also fit a model without these:
+  b2_priors <- c(
+    set_prior("student_t(5,0,2.5)", class = "b"),
+    set_prior("student_t(5,0,2.5)", class = "Intercept"),
+    set_prior("lkj(2)", class = "cor"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Language"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Language"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Family"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Family"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Area"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Area"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Trillyes", group="Area"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes:Trillyes", group="Area")
+  ); # no random slppes for Trill by Family
+  # prior predictive checks:
+  set.seed(314); # for replicability
+  plot_prefix <- plot_prefix_original <- "./figures/xling_brm_omnibus_mod_r_revision_langrand_original";
+  b_prior <- brms::brm(r ~ 1 + rough * Trill +
+                         (1 + rough | Language) +
+                         (1 + rough | Family) +
+                         (1 + rough * Trill | Area),
+                       data=data_full_revised,
+                       prior=b2_priors,
+                       family="bernoulli",
+                       sample_prior='only',  # needed for prior predictive checks
+                       cores=brms_ncores, seed=314);
+  g <- arrangeGrob(pp_check(b_prior, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Prior predictive distribution of minimum values'),
+                   pp_check(b_prior, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Prior predictive distribution of means'),
+                   pp_check(b_prior, type='stat', stat='max') + xlab('p(r)') + ggtitle('Prior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min, even if the mean is a bit off but not much)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_prior_predictive_checks.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  set.seed(314); # for replicability
+  b2 <- brms::brm(r ~ 1 + rough * Trill +
+                    (1 + rough | Language) +
+                    (1 + rough | Family) +
+                    (1 + rough * Trill | Area),
+                  data=data_full_revised,
+                  prior=b2_priors,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b2); mcmc_plot(b2, type="trace"); mcmc_plot(b2);
+  (hyps_original <- brms::hypothesis(b2, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0", "roughyes:Trillyes = 0")));
+  (hdi95_original <- hdi(b2, ci=0.95));
+  m_original <- b2;
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_original <- "./figures/xling_brm_omnibus_mod_r_revision_langrand_original";
+  mcmc_plot(b2, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b2); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b2, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_original <- capture.output(summary(b2));
+  probs_text_original <- capture.output(probs_original <- logistic_summary(b2, dat=data_full_revised, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b2, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b2, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b2, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b2, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  # model comparisons
+  m_original <- brms_fit_indices(m_original, moment_match=TRUE);
+  (modcmp_0_original <- brms_compare_models(b0, m_original, "[null]", "[original]", bayes_factor=brms_bayes_factors)); # original is better than null
+  (modcmp_full_original <- brms_compare_models(m_full, m_original, "[full]", "[original]", bayes_factor=brms_bayes_factors)); # they seem very similar
+  # -> no reason to pick the original over the full here...
+  
+  
+  ## check if Trill:rough really matters (because it seems it might not):
+  b3_priors <- c(
+    set_prior("student_t(5,0,2.5)", class = "b"),
+    set_prior("student_t(5,0,2.5)", class = "Intercept"),
+    set_prior("lkj(2)", class = "cor"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Language"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Language"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Family"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Family"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Area"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Area"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Trillyes", group="Area")
+  ); # no interaction
+  set.seed(314); # for replicability
+  b3 <- brms::brm(r ~ 1 + rough + Trill +
+                    (1 + rough + Trill | Language) +
+                    (1 + rough + Trill | Family) +
+                    (1 + rough + Trill | Area),
+                  data=data_full_revised,
+                  prior=b3_priors,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, iter=3000, control=list(adapt_delta=0.99), seed=314); # adapt_delta=0.99 needed to deal with divergent transition(s);  iter=3000 needed to avoid ESS being too low
+  summary(b3); mcmc_plot(b3, type="trace"); mcmc_plot(b3);
+  (hyps_noint <- brms::hypothesis(b3, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0")));
+  (hdi95_noint <- hdi(b3, ci=0.95));
+  m_noint <- b3;
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_noint <- "./figures/xling_brm_omnibus_mod_r_revision_langrand_noint";
+  mcmc_plot(b3, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b3); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b3, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_noint <- capture.output(summary(b3));
+  probs_text_noint <- capture.output(probs_noint <- logistic_summary(b3, dat=data_full_revised, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b3, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b3, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b3, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b3, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  # model comparisons
+  m_noint <- brms_fit_indices(m_noint, moment_match=TRUE);
+  (modcmp_0_noint <- brms_compare_models(b0, m_noint, "[null]", "[noint]", bayes_factor=brms_bayes_factors)); # noint is better than null
+  (modcmp_full_noint <- brms_compare_models(m_full, m_noint, "[full]", "[noint]", bayes_factor=brms_bayes_factors)); # they seem largely equivalent with a hint that full is better
+  (modcmp_original_noint <- brms_compare_models(m_original, m_noint, "[original]", "[noint]", bayes_factor=brms_bayes_factors)); # they are equivalent
+  # -> we can remove the interaction Trill:rough...
+
+
+  # check if Trill is needed at all (because it seems it might not):
+  b4_priors <- c(
+    set_prior("student_t(5,0,2.5)", class = "b"),
+    set_prior("student_t(5,0,2.5)", class = "Intercept"),
+    set_prior("lkj(2)", class = "cor"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Language"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Language"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Family"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Family"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Area"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Area")
+  ); # no Trill
+  set.seed(314); # for replicability
+  b4 <- brms::brm(r ~ 1 + rough +
+                    (1 + rough | Language) +
+                    (1 + rough | Family) +
+                    (1 + rough | Area),
+                  data=data_full_revised,
+                  prior=b4_priors,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b4); mcmc_plot(b4, type="trace"); mcmc_plot(b4);
+  (hyps_notrill <- brms::hypothesis(b4, c("roughyes = 0", "roughyes > 0")));
+  (hdi95_notrill <- hdi(b4, ci=0.95));
+  m_notrill <- b4;
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_notrill <- "./figures/xling_brm_omnibus_mod_r_revision_langrand_notrill";
+  mcmc_plot(b4, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b4); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b4, type="pred", terms=c("rough")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_notrill <- capture.output(summary(b4));
+  probs_text_notrill <- capture.output(probs_notrill <- logistic_summary(b4, dat=data_full_revised, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b4, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b4, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b4, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b4, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  # model comparisons
+  m_notrill <- brms_fit_indices(m_notrill, moment_match=TRUE);
+  (modcmp_0_notrill <- brms_compare_models(b0, m_notrill, "[null]", "[notrill]", bayes_factor=brms_bayes_factors)); # notrill is better than null
+  (modcmp_full_notrill <- brms_compare_models(m_full, m_notrill, "[full]", "[notrill]", bayes_factor=brms_bayes_factors)); # very mixed results
+  (modcmp_original_notrill <- brms_compare_models(m_original, m_notrill, "[original]", "[notrill]", bayes_factor=brms_bayes_factors)); # they are relatively equivalent but with a hint that notrill is better
+  (modcmp_noint_notrill <- brms_compare_models(m_noint, m_notrill, "[noint]", "[notrill]", bayes_factor=brms_bayes_factors)); # notrill is better
+  # -> so, Trill is not needed apparently...
+
+  
+  # model comparison with the model without Language as random effect:
+  (modcmp_original_LnoL <- brms_compare_models(m_original, xling_brm_omnibus_mod_r_revision_results$original$model, "[with Language]", "[without Language]", bayes_factor=brms_bayes_factors)); # seem equivalent with a hint that with Language is better
+  (modcmp_full_LnoL <- brms_compare_models(m_full, xling_brm_omnibus_mod_r_revision_results$full$model, "[with Language]", "[without Language]", bayes_factor=brms_bayes_factors)); # seem equivalent with a hint that with Language is better
+
+  
+  # compare with the default  priors (prior sensitivity check):
+  set.seed(314); # for replicability
+  b1f <- brms::brm(r ~ 1 + rough * Trill +
+                     (1 + rough * Trill | Language) +
+                     (1 + rough * Trill | Family) +
+                     (1 + rough * Trill | Area),
+                   data=data_full_revised,
+                   family="bernoulli",
+                   save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                   sample_prior=TRUE,  # needed for hypotheses tests
+                   cores=brms_ncores, iter=3000, seed=314); # iter=3000 needed to avoid ESS being too low
+  summary(b1f); mcmc_plot(b1f, type="trace"); mcmc_plot(b1f);
+  (hyps_f <- brms::hypothesis(b1f, c("roughyes = 0", "roughyes > 0")));
+  (hdi95_f <- hdi(b1f, ci=0.95));
+  pp_check(b1f, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay');
+  g <- arrangeGrob(pp_check(b1f, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1f, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1f, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g);
+  b1f <- brms_fit_indices(b1f, moment_match=TRUE);
+  (modcmp_f <- brms_compare_models(m_full, b1f, "[custom prior]", "[default prior]", bayes_factor=brms_bayes_factors)); # contradicting results, but seem comparable...
+
+  
+  xling_brm_omnibus_mod_r_revision_langrand_results <- list("full"=list("model"=NULL, #m_full, # needed for later comparisons
+                                                                        "summary"=summary_mod_full, "hypotheses"=hyps_full, "hdi95"=hdi95_full, 
+                                                                        "cmp_to_null"=modcmp_0_full, "cmp_no_Language"=modcmp_full_LnoL, "probs"=probs_full, "probs_text"=probs_text_full, "plot_prefix"=plot_prefix_full),
+                                                            "original"=list("model"=NULL, #m_original, # needed for later comparisons
+                                                                            "summary"=summary_mod_original, "hypotheses"=hyps_original, "hdi95"=hdi95_original, 
+                                                                            "cmp_to_null"=modcmp_0_original,  "cmp_to_full"=modcmp_full_original, "cmp_to_noLanguage"=modcmp_original_LnoL,
+                                                                            "probs"=probs_original, "probs_text"=probs_text_original, "plot_prefix"=plot_prefix_original),
+                                                            "noint"=list("model"=NULL, #m_noint, # needed for later comparisons
+                                                                         "summary"=summary_mod_noint, "hypotheses"=hyps_noint, "hdi95"=hdi95_noint, 
+                                                                         "cmp_to_null"=modcmp_0_noint,  "cmp_to_full"=modcmp_full_noint, "probs"=probs_noint, "probs_text"=probs_text_noint, "plot_prefix"=plot_prefix_noint),
+                                                            "notrill"=list("model"=NULL, #m_notrill, # needed for later comparisons
+                                                                           "summary"=summary_mod_notrill, "hypotheses"=hyps_notrill, "hdi95"=hdi95_notrill, 
+                                                                           "cmp_to_null"=modcmp_0_notrill,  "cmp_to_full"=modcmp_full_notrill, "cmp_to_noint"=modcmp_noint_notrill, 
+                                                                           "probs"=probs_notrill, "probs_text"=probs_text_notrill, "plot_prefix"=plot_prefix_notrill),
+                                                            "full_default_priors"=list("hypotheses"=hyps_f, "hdi95"=hdi95_f, "modcmp"=modcmp_f));
+  
+  # save the results we need later on:
+  save(xling_brm_omnibus_mod_r_revision_langrand_results, 
+       file=file_name, compress="xz", compression_level=9); # save this model
+} else
+{
+  load(file_name);
+}
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_omnibus_mod_r_revision_langrand_results$full$summary,sep="\n"));
+xling_brm_omnibus_mod_r_revision_langrand_results$full$hypotheses;
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_omnibus_mod_r_revision_langrand_results$full$probs_text,sep="\n"));
+
+## -----------------------------------------------------------------------------
+cat("Custom priors:\n"); xling_brm_omnibus_mod_r_revision_langrand_results$full$hdi95;
+cat("\n\nDefault priors:\n"); xling_brm_omnibus_mod_r_revision_langrand_results$full_default_priors$hdi95;
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_omnibus_mod_r_revision_results$original$probs_text,sep="\n"));
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_omnibus_mod_r_revision_langrand_results$full$probs_text,sep="\n"));
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_omnibus_mod_r_revision_langrand_results$noint$summary,sep="\n"));
+xling_brm_omnibus_mod_r_revision_langrand_results$noint$hypotheses;
+
+## ----results='hide', warning=FALSE, message=FALSE-----------------------------
+file_name <- "./cached/xling_replic_omnibus_langrand_mgn.RData";
+if( !file.exists(file_name) )
+{
+  # cache these results:
+
+  ## Bayesian ##
+
+  # fit the logistic model:
+  b1_priors_mgn <- c(
+    brms::set_prior("normal(0,3)", class = "b"),
+    brms::set_prior("normal(0,3)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Language"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Trillyes", group="Language"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes:Trillyes", group="Language"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Trillyes", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes:Trillyes", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Area"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Trillyes", group="Area"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes:Trillyes", group="Area")
+  ); # for the full model
+  set.seed(314); # for replicability
+  b1_mgn <- brms::brm(r ~ 1 + rough * Trill +
+                    (1 + rough * Trill | Language) +
+                    (1 + rough * Trill | Family) +
+                    (1 + rough * Trill | Area),
+                  data=data_full_revised,
+                  prior=b1_priors_mgn,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, iter=3000, seed=314); # iter=3000 needed to avoid ESS being too low
+  summary(b1_mgn); mcmc_plot(b1_mgn, type="trace"); mcmc_plot(b1_mgn);
+  (hyps_full_mgn <- brms::hypothesis(b1_mgn, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0", "roughyes:Trillyes = 0")));
+  (hdi95_full_mgn <- hdi(b1_mgn, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_full_mgn <- "./figures/xling_brm_omnibus_mod_r_revision_langrand_full_mgn";
+  mcmc_plot(b1_mgn, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b1_mgn); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b1_mgn, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_full_mgn <- capture.output(summary(b1_mgn));
+  probs_text_full_mgn <- capture.output(probs_full_mgn <- logistic_summary(b1_mgn, dat=data_full_revised, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b1_mgn, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b1_mgn, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1_mgn, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1_mgn, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  b1_mgn <- brms_fit_indices(b1_mgn);
+  m_full_mgn <- b1_mgn;
+  
+  # model comparison with the null model:
+  b0_priors_mgn <- c(
+    brms::set_prior("normal(0,3)", class = "Intercept"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Area")
+  ); # for the null model
+  b0_mgn <- brms::brm(r ~ 1 +
+                    (1 | Language) +
+                    (1 | Family) +
+                    (1 | Area),
+                  data=data_full_revised,
+                  prior=b0_priors_mgn,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), seed=314); # adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b0_mgn); 
+  mcmc_plot(b0_mgn, type="trace"); 
+  mcmc_plot(b0_mgn);
+  b0_mgn <- brms_fit_indices(b0_mgn);
+  (modcmp_0_full_mgn <- brms_compare_models(b0_mgn, m_full_mgn, "[null]", "[full]", bayes_factor=brms_bayes_factors)); # full is better than null
+
+
+  # following @winter_trilled_2022 observation "When the same model is fitted without by-Family random slopes over Trill, essentially the same results are obtained, but with narrower credible intervals" we also fit a model without these:
+  b2_priors_mgn <- c(
+    set_prior("normal(0,3)", class = "b"),
+    set_prior("normal(0,3)", class = "Intercept"),
+    set_prior("lkj(2)", class = "cor"),
+    set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Language"),
+    set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Language"),
+    set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Family"),
+    set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Family"),
+    set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Area"),
+    set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Area"),
+    set_prior("exponential(4)", class = "sd", coef = "Trillyes", group="Area"),
+    set_prior("exponential(4)", class = "sd", coef = "roughyes:Trillyes", group="Area")
+  ); # no random slppes for Trill by Family
+  # prior predictive checks:
+  set.seed(314); # for replicability
+  plot_prefix <- plot_prefix_original_mgn <- "./figures/xling_brm_omnibus_mod_r_revision_langrand_original_mgn";
+  b_prior_mgn <- brms::brm(r ~ 1 + rough * Trill +
+                         (1 + rough | Language) +
+                         (1 + rough | Family) +
+                         (1 + rough * Trill | Area),
+                       data=data_full_revised,
+                       prior=b2_priors_mgn,
+                       family="bernoulli",
+                       sample_prior='only',  # needed for prior predictive checks
+                       cores=brms_ncores, seed=314);
+  g <- arrangeGrob(pp_check(b_prior_mgn, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Prior predictive distribution of minimum values'),
+                   pp_check(b_prior_mgn, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Prior predictive distribution of means'),
+                   pp_check(b_prior_mgn, type='stat', stat='max') + xlab('p(r)') + ggtitle('Prior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min, even if the mean is a bit off but not much)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_prior_predictive_checks.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  set.seed(314); # for replicability
+  b2_mgn <- brms::brm(r ~ 1 + rough * Trill +
+                    (1 + rough | Language) +
+                    (1 + rough | Family) +
+                    (1 + rough * Trill | Area),
+                  data=data_full_revised,
+                  prior=b2_priors_mgn,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b2_mgn); mcmc_plot(b2_mgn, type="trace"); mcmc_plot(b2_mgn);
+  (hyps_original_mgn <- brms::hypothesis(b2_mgn, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0", "roughyes:Trillyes = 0")));
+  (hdi95_original_mgn <- hdi(b2_mgn, ci=0.95));
+  m_original_mgn <- b2_mgn;
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_original_mgn <- "./figures/xling_brm_omnibus_mod_r_revision_langrand_original_mgn";
+  mcmc_plot(b2_mgn, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b2_mgn); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b2_mgn, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_original_mgn <- capture.output(summary(b2_mgn));
+  probs_text_original_mgn <- capture.output(probs_original_mgn <- logistic_summary(b2_mgn, dat=data_full_revised, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b2_mgn, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b2_mgn, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b2_mgn, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b2_mgn, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  # model comparisons
+  m_original_mgn <- brms_fit_indices(m_original_mgn);
+  (modcmp_0_original_mgn <- brms_compare_models(b0_mgn, m_original_mgn, "[null]", "[original]", bayes_factor=brms_bayes_factors)); # original is better than null
+  (modcmp_full_original_mgn <- brms_compare_models(m_full_mgn, m_original_mgn, "[full]", "[original]", bayes_factor=brms_bayes_factors)); # they are very similar
+  # -> no reason to pick the original over the full here...
+  
+  
+  ## check if Trill:rough really matters (because it seems it might not):
+  b3_priors_mgn <- c(
+    set_prior("normal(0,3)", class = "b"),
+    set_prior("normal(0,3)", class = "Intercept"),
+    set_prior("lkj(2)", class = "cor"),
+    set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Language"),
+    set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Language"),
+    set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Family"),
+    set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Family"),
+    set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Area"),
+    set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Area"),
+    set_prior("exponential(4)", class = "sd", coef = "Trillyes", group="Area")
+  ); # no interaction
+  set.seed(314); # for replicability
+  b3_mgn <- brms::brm(r ~ 1 + rough + Trill +
+                    (1 + rough + Trill | Language) +
+                    (1 + rough + Trill | Family) +
+                    (1 + rough + Trill | Area),
+                  data=data_full_revised,
+                  prior=b3_priors_mgn,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b3_mgn); mcmc_plot(b3_mgn, type="trace"); mcmc_plot(b3_mgn);
+  (hyps_noint_mgn <- brms::hypothesis(b3_mgn, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0")));
+  (hdi95_noint_mgn <- hdi(b3_mgn, ci=0.95));
+  m_noint_mgn <- b3_mgn;
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_noint_mgn <- "./figures/xling_brm_omnibus_mod_r_revision_langrand_noint_mgn";
+  mcmc_plot(b3_mgn, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b3_mgn); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b3_mgn, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_noint_mgn <- capture.output(summary(b3_mgn));
+  probs_text_noint_mgn <- capture.output(probs_noint_mgn <- logistic_summary(b3_mgn, dat=data_full_revised, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b3_mgn, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b3_mgn, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b3_mgn, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b3_mgn, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  # model comparisons
+  m_noint_mgn <- brms_fit_indices(m_noint_mgn);
+  (modcmp_0_noint_mgn <- brms_compare_models(b0_mgn, m_noint_mgn, "[null]", "[noint]", bayes_factor=brms_bayes_factors)); # noint is better than null
+  (modcmp_full_noint_mgn <- brms_compare_models(m_full_mgn, m_noint_mgn, "[full]", "[noint]", bayes_factor=brms_bayes_factors)); # they are equivalent
+  (modcmp_original_noint_mgn <- brms_compare_models(m_original_mgn, m_noint_mgn, "[original]", "[noint]", bayes_factor=brms_bayes_factors)); # they are equivalent
+  # -> we can remove the interaction Trill:rough...
+
+
+  # check if Trill is needed at all (because it seems it might not):
+  b4_priors_mgn <- c(
+    set_prior("normal(0,3)", class = "b"),
+    set_prior("normal(0,3)", class = "Intercept"),
+    set_prior("lkj(2)", class = "cor"),
+    set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Language"),
+    set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Language"),
+    set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Family"),
+    set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Family"),
+    set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Area"),
+    set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Area")
+  ); # no Trill
+  set.seed(314); # for replicability
+  b4_mgn <- brms::brm(r ~ 1 + rough +
+                    (1 + rough | Language) +
+                    (1 + rough | Family) +
+                    (1 + rough | Area),
+                  data=data_full_revised,
+                  prior=b4_priors_mgn,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), seed=314); # adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b4_mgn); mcmc_plot(b4_mgn, type="trace"); mcmc_plot(b4_mgn);
+  (hyps_notrill_mgn <- brms::hypothesis(b4_mgn, c("roughyes = 0", "roughyes > 0")));
+  (hdi95_notrill_mgn <- hdi(b4_mgn, ci=0.95));
+  m_notrill_mgn <- b4_mgn;
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_notrill_mgn <- "./figures/xling_brm_omnibus_mod_r_revision_langrand_notrill_mgn";
+  mcmc_plot(b4_mgn, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b4_mgn); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b4_mgn, type="pred", terms=c("rough")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_notrill_mgn <- capture.output(summary(b4_mgn));
+  probs_text_notrill_mgn <- capture.output(probs_notrill_mgn <- logistic_summary(b4_mgn, dat=data_full_revised, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b4_mgn, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b4_mgn, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b4_mgn, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b4_mgn, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  # model comparisons
+  m_notrill_mgn <- brms_fit_indices(m_notrill_mgn, moment_match=TRUE);
+  (modcmp_0_notrill_mgn <- brms_compare_models(b0_mgn, m_notrill_mgn, "[null]", "[notrill]", bayes_factor=brms_bayes_factors)); # notrill is better than null
+  (modcmp_full_notrill_mgn <- brms_compare_models(m_full_mgn, m_notrill_mgn, "[full]", "[notrill]", bayes_factor=brms_bayes_factors)); # pretty much equivalent
+  (modcmp_original_notrill_mgn <- brms_compare_models(m_original_mgn, m_notrill_mgn, "[original]", "[notrill]", bayes_factor=brms_bayes_factors)); # they are relatively equivalent but with a hint that notrill is better
+  (modcmp_noint_notrill_mgn <- brms_compare_models(m_noint_mgn, m_notrill_mgn, "[noint]", "[notrill]", bayes_factor=brms_bayes_factors)); # notrill is better
+  # -> so, Trill is not needed apparently...
+
+  
+  xling_brm_omnibus_mod_r_revision_langrand_mgn_results <- list("full"=list("model"=NULL, #m_full, # needed for later comparisons
+                                                                        "summary"=summary_mod_full_mgn, "hypotheses"=hyps_full_mgn, "hdi95"=hdi95_full_mgn, 
+                                                                        "cmp_to_null"=modcmp_0_full_mgn, "probs"=probs_full_mgn, "probs_text"=probs_text_full_mgn, "plot_prefix"=plot_prefix_full_mgn),
+                                                            "original"=list("model"=NULL, #m_original, # needed for later comparisons
+                                                                            "summary"=summary_mod_original_mgn, "hypotheses"=hyps_original_mgn, "hdi95"=hdi95_original_mgn, 
+                                                                            "cmp_to_null"=modcmp_0_original_mgn,  "cmp_to_full"=modcmp_full_original_mgn, 
+                                                                            "probs"=probs_original_mgn, "probs_text"=probs_text_original_mgn, "plot_prefix"=plot_prefix_original_mgn),
+                                                            "noint"=list("model"=NULL, #m_noint, # needed for later comparisons
+                                                                         "summary"=summary_mod_noint_mgn, "hypotheses"=hyps_noint_mgn, "hdi95"=hdi95_noint_mgn, 
+                                                                         "cmp_to_null"=modcmp_0_noint_mgn,  "cmp_to_full"=modcmp_full_noint_mgn, "cmp_to_original"=modcmp_original_noint_mgn,
+                                                                         "probs"=probs_noint_mgn, "probs_text"=probs_text_noint_mgn, "plot_prefix"=plot_prefix_noint_mgn),
+                                                            "notrill"=list("model"=NULL, #m_notrill, # needed for later comparisons
+                                                                           "summary"=summary_mod_notrill_mgn, "hypotheses"=hyps_notrill_mgn, "hdi95"=hdi95_notrill_mgn, 
+                                                                           "cmp_to_null"=modcmp_0_notrill_mgn,  "cmp_to_full"=modcmp_full_notrill_mgn, "cmp_to_noint"=modcmp_noint_notrill_mgn, 
+                                                                           "probs"=probs_notrill_mgn, "probs_text"=probs_text_notrill_mgn, "plot_prefix"=plot_prefix_notrill_mgn));
+  
+  # save the results we need later on:
+  save(xling_brm_omnibus_mod_r_revision_langrand_mgn_results, 
+       file=file_name, compress="xz", compression_level=9); # save this model
+} else
+{
+  load(file_name);
+}
+
+## -----------------------------------------------------------------------------
+xling_brm_omnibus_mod_r_revision_langrand_mgn_results$noint$hypotheses;
+
+## -----------------------------------------------------------------------------
+cat(paste0(xling_brm_omnibus_mod_r_revision_langrand_results$notrill$summary,sep="\n"));
+
+## -----------------------------------------------------------------------------
+cat(paste0(xling_brm_omnibus_mod_r_revision_langrand_mgn_results$notrill$summary,sep="\n"));
+
+## -----------------------------------------------------------------------------
+# Select the recoded languages with trill:
+data_R_revision_trill_rs_ie <- dplyr::filter(data_R_revision_ie, revision=="trilled",
+                                             Meaning %in% c("rough","smooth"));
+
+data_r_revision_trill_rs_ie_1 <- data_R_revision_trill_rs_ie %>% 
+  dplyr::mutate(Trill=ifelse(revision=="trilled","yes",NA));
+
+# recode as factors:
+data_r_revision_trill_rs_ie_1$rough <- factor(c("no", "yes")[as.numeric(data_r_revision_trill_rs_ie_1$rough)+1], levels=c("no", "yes"));
+data_r_revision_trill_rs_ie_1$r     <- factor(c("no", "yes")[as.numeric(data_r_revision_trill_rs_ie_1$r)+1],     levels=c("no", "yes"));
+data_r_revision_trill_rs_ie_1$l     <- factor(c("no", "yes")[as.numeric(data_r_revision_trill_rs_ie_1$l)+1],     levels=c("no", "yes"));
+
+
+# Select the recoded languages without trill:
+data_R_revision_other_rs_ie <- dplyr::filter(data_R_revision_ie, revision=="other",
+                                          Meaning %in% c("rough","smooth"));
+
+data_r_revision_other_rs_ie_1 <- data_R_revision_other_rs_ie %>% 
+  dplyr::mutate(Trill=ifelse(revision=="other","no",NA));
+
+# recode as factors:
+data_r_revision_other_rs_ie_1$rough <- factor(c("no", "yes")[as.numeric(data_r_revision_other_rs_ie_1$rough)+1], levels=c("no", "yes"));
+data_r_revision_other_rs_ie_1$r     <- factor(c("no", "yes")[as.numeric(data_r_revision_other_rs_ie_1$r)+1],     levels=c("no", "yes"));
+data_r_revision_other_rs_ie_1$l     <- factor(c("no", "yes")[as.numeric(data_r_revision_other_rs_ie_1$l)+1],     levels=c("no", "yes"));
+
+
+# Select the recoded languages:
+data_full_revised_ie <- rough_r_data_ie %>%
+  dplyr::filter(!is.na(revision)) %>% 
+  dplyr::mutate(Trill=ifelse(revision=="other","no",
+                             ifelse(revision=="trilled","yes",NA))) %>% 
+  dplyr::filter(Meaning %in% c("rough","smooth"),
+                !is.na(Trill));
+
+# recode as factors:
+data_full_revised_ie$rough <- factor(c("no", "yes")[as.numeric(data_full_revised_ie$rough)+1], levels=c("no", "yes"));
+data_full_revised_ie$r     <- factor(c("no", "yes")[as.numeric(data_full_revised_ie$r)+1],     levels=c("no", "yes"));
+data_full_revised_ie$l     <- factor(c("no", "yes")[as.numeric(data_full_revised_ie$l)+1],     levels=c("no", "yes"));
+data_full_revised_ie$Trill <- factor(data_full_revised_ie$Trill,                               levels=c("no", "yes"));
+
+## ----results='hide', warning=FALSE, message=FALSE-----------------------------
+file_name <- "./cached/xling_replic_withr_langrand_ie.RData";
+if( !file.exists(file_name) )
+{
+  # cache these results:
+  
+  ## Frequentist ##
+  set.seed(314); # for replicability
+  m1 <- glmer(r ~ 1 + rough +
+                (1 + rough | Language) + # language is nested within families so no need to include their interaction
+                (1 + rough | Family) +
+                (1 + rough | Area),
+              data=data_r_revision_trill_rs_ie_1,
+              family=binomial(), 
+              control=glmerControl(optCtrl=list(maxfun=2e4), optimizer="bobyqa")); # singular fit
+  rePCA(m1); summary(m1); # seems to be the Area 
+  m2 <- update(m1, . ~ . - (1 + rough | Area) + (1 | Area) - 
+                 (1 | Area)); rePCA(m2); summary(m2); anova(m1, m2); # ok, not singular...
+  m0 <- update(m2, . ~ . - rough); summary(m0); # singular fit, but probably not very problematic here
+  anova(m2, m0); # much better than the null (p=1.172e-11, ΔAIC=-44.02)
+  plot_prefix <- "./figures/xling_glmer_rs_logistic_mod_r_revision_ie_langrand";
+  plot_model(m2, type="pred", terms="rough"); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  xling_glmer_omnibus_mod_r_revision_results <- list("model"=m2, # needed for later comparisons
+                                                     "cmp_to_null"=anova(m2, m0), "plot_prefix"=plot_prefix);
+  
+  
+  ## Bayesian ##
+  # check the priors that we can set:
+  get_prior(r ~ 1 + rough +
+              (1 + rough | Language) + # language is nested within families so no need to include their interaction
+              (1 + rough | Family) +
+              (1 + rough | Area),
+            data=data_r_revision_trill_rs_ie_1,
+            family="bernoulli");
+  # setting the priors:
+  b1_priors <- c(
+    brms::set_prior("student_t(5,0,2.5)", class = "b"),
+    brms::set_prior("student_t(5,0,2.5)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Language"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Area")
+  ); # for the full model
+  # prior predictive checks:
+  set.seed(314); # for replicability
+  b_prior <- brms::brm(r ~ 1 + rough +
+                         (1 + rough | Language) + # language is nested within families so no need to include their interaction
+                         (1 + rough | Family) +
+                         (1 + rough | Area),
+                       data=data_r_revision_trill_rs_ie_1,
+                       prior=b1_priors,
+                       family="bernoulli",
+                       sample_prior='only',  # needed for prior predictive checks
+                       cores=brms_ncores, seed=314);
+  # save the results we need later on:
+  plot_prefix <- "./figures/xling_brm_rs_logistic_mod_r_revision_ie_langrand";
+  g <- arrangeGrob(pp_check(b_prior, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Prior predictive distribution of minimum values'),
+                   pp_check(b_prior, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Prior predictive distribution of means'),
+                   pp_check(b_prior, type='stat', stat='max') + xlab('p(r)') + ggtitle('Prior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min, even if the mean is a bit off but not much)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_prior_predictive_checks.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  
+  # fit the logistic model:
+  set.seed(314); # for replicability
+  b1 <- brms::brm(r ~ 1 + rough +
+                    (1 + rough | Language) + # language is nested within families so no need to include their interaction
+                    (1 + rough | Family) +
+                    (1 + rough | Area),
+                  data=data_r_revision_trill_rs_ie_1,
+                  prior=b1_priors,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b1); mcmc_plot(b1, type="trace"); mcmc_plot(b1);
+  (hyps <- brms::hypothesis(b1, c("roughyes = 0", "roughyes > 0")));
+  (hdi95<- hdi(b1, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_full <- "./figures/xling_brm_rs_logistic_mod_r_revision_ie_langrand";
+  mcmc_plot(b1, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b1); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b1, type="pred", terms=c("rough")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod <- capture.output(summary(b1));
+  probs_text <- capture.output(probs <- logistic_summary(b1, dat=data_full_revised, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b1, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b1, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  
+  # model comparison with the null model:
+  b0_priors <- c(
+    brms::set_prior("student_t(5,0,2.5)", class = "Intercept"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Area")
+  ); # for the null model
+  b0 <- brms::brm(r ~ 1 +
+                    (1 | Language) + # language is nested within families so no need to include their interaction
+                    (1 | Family) +
+                    (1 | Area),
+                  data=data_r_revision_trill_rs_ie_1,
+                  prior=b0_priors,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b0); 
+  mcmc_plot(b0, type="trace"); 
+  mcmc_plot(b0);
+  b0 <- brms_fit_indices(b0);
+  b1 <- brms_fit_indices(b1, moment_match=TRUE);
+  (modcmp <- brms_compare_models(b0, b1, "[null]", "[+ 'rough']", bayes_factor=brms_bayes_factors)); # + rough clearly better than null
+  # --> clear positive effect of 'rough'
+  
+  
+  # compare with the default  priors (prior sensitivity check):
+  set.seed(314); # for replicability
+  b1f <- brms::brm(r ~ 1 + rough +
+                     (1 + rough | Language) + # language is nested within families so no need to include their interaction
+                     (1 + rough | Family) +
+                     (1 + rough | Area),
+                   data=data_r_revision_trill_rs_ie_1,
+                   family="bernoulli",
+                   save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                   sample_prior=TRUE,  # needed for hypotheses tests
+                   cores=brms_ncores, iter=3000, control=list(adapt_delta=0.99), seed=314); # adapt_delta=0.99 needed to deal with divergent transition(s); iter=3000 to avoid ESS too low
+  summary(b1f); mcmc_plot(b1f, type="trace"); mcmc_plot(b1f);
+  (hyps_f <- brms::hypothesis(b1f, c("roughyes = 0", "roughyes > 0")));
+  (hdi95_f <- hdi(b1f, ci=0.95));
+  pp_check(b1f, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay');
+  g <- arrangeGrob(pp_check(b1f, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1f, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1f, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g);
+  b1f <- brms_fit_indices(b1f, moment_match=TRUE);
+  (modcmp_f <- brms_compare_models(b1, b1f, "[custom prior]", "[default prior]", bayes_factor=brms_bayes_factors)); # very similar
+  
+  
+  # save the results we need later on:
+  xling_brm_rs_logistic_mod_r_revision_langrand_ie_results <- list("model"=NULL, #b1, # needed for later comparisons
+                                                                   "summary"=summary_mod, "hypotheses"=hyps, "hdi95"=hdi95, "cmp_to_null"=modcmp, 
+                                                                   "probs"=probs, "probs_text"=probs_text, "plot_prefix"=plot_prefix,
+                                                                   "cmp_to_default_prior"=modcmp_f, "hdi95__default_prior"=hdi95_f);
+  save(xling_brm_rs_logistic_mod_r_revision_langrand_ie_results, 
+       xling_glmer_omnibus_mod_r_revision_results,
+       file=file_name, compress="xz", compression_level=9); # save this model
+} else
+{
+  load(file_name);
+}
+
+## -----------------------------------------------------------------------------
+summary(xling_glmer_omnibus_mod_r_revision_results$model);
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_rs_logistic_mod_r_revision_langrand_ie_results$summary,sep="\n"));
+xling_brm_rs_logistic_mod_r_revision_langrand_ie_results$hdi95
+
+## -----------------------------------------------------------------------------
+xling_brm_rs_logistic_mod_r_revision_langrand_ie_results$hypotheses;
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_rs_logistic_mod_r_revision_langrand_ie_results$probs_text,sep="\n"));
+
+## ----results='hide', warning=FALSE, message=FALSE-----------------------------
+file_name <- "./cached/xling_replic_withr_langrand_ie_mgn.RData";
+if( !file.exists(file_name) )
+{
+  # cache these results:
+
+  ## Bayesian ##
+  # prior predictive checks:
+  b1_priors_mgn <- c(
+    brms::set_prior("normal(0,3)", class = "b"),
+    brms::set_prior("normal(0,3)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Language"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Area")
+  ); # for the full model
+  set.seed(314); # for replicability
+  b_prior_mgn <- brms::brm(r ~ 1 + rough +
+                         (1 + rough | Language) + # language is nested within families so no need to include their interaction
+                         (1 + rough | Family) +
+                         (1 + rough | Area),
+                       data=data_r_revision_trill_rs_ie_1,
+                       prior=b1_priors_mgn,
+                       family="bernoulli",
+                       sample_prior='only',  # needed for prior predictive checks
+                       cores=brms_ncores, seed=314);
+  # save the results we need later on:
+  plot_prefix <- "./figures/xling_brm_rs_logistic_mod_r_revision_ie_langrand_mgn";
+  g <- arrangeGrob(pp_check(b_prior_mgn, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Prior predictive distribution of minimum values'),
+                   pp_check(b_prior_mgn, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Prior predictive distribution of means'),
+                   pp_check(b_prior_mgn, type='stat', stat='max') + xlab('p(r)') + ggtitle('Prior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min, even if the mean is a bit off but not much)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_prior_predictive_checks.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  
+  # fit the logistic model:
+  set.seed(314); # for replicability
+  b1_mgn <- brms::brm(r ~ 1 + rough +
+                    (1 + rough | Language) + # language is nested within families so no need to include their interaction
+                    (1 + rough | Family) +
+                    (1 + rough | Area),
+                  data=data_r_revision_trill_rs_ie_1,
+                  prior=b1_priors_mgn,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b1_mgn); mcmc_plot(b1_mgn, type="trace"); mcmc_plot(b1_mgn);
+  (hyps_mgn <- brms::hypothesis(b1_mgn, c("roughyes = 0", "roughyes > 0")));
+  (hdi95_mgn <- hdi(b1_mgn, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_full <- "./figures/xling_brm_rs_logistic_mod_r_revision_ie_langrand_mgn";
+  mcmc_plot(b1_mgn, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b1_mgn); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b1_mgn, type="pred", terms=c("rough")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod <- capture.output(summary(b1_mgn));
+  probs_text <- capture.output(probs <- logistic_summary(b1_mgn, dat=data_full_revised, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b1_mgn, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b1_mgn, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1_mgn, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1_mgn, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  
+  # model comparison with the null model:
+  b0_priors_mgn <- c(
+    brms::set_prior("normal(0,3)", class = "Intercept"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Area")
+  ); # for the null model
+  b0_mgn <- brms::brm(r ~ 1 +
+                    (1 | Language) + # language is nested within families so no need to include their interaction
+                    (1 | Family) +
+                    (1 | Area),
+                  data=data_r_revision_trill_rs_ie_1,
+                  prior=b0_priors_mgn,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b0_mgn); 
+  mcmc_plot(b0_mgn, type="trace"); 
+  mcmc_plot(b0_mgn);
+  b0_mgn <- brms_fit_indices(b0_mgn);
+  b1_mgn <- brms_fit_indices(b1_mgn, moment_match=TRUE);
+  (modcmp <- brms_compare_models(b0_mgn, b1_mgn, "[null]", "[+ 'rough']", bayes_factor=brms_bayes_factors)); # + rough clearly better than null
+  # --> clear positive effect of 'rough'
+
+  
+  # save the results we need later on:
+  xling_brm_rs_logistic_mod_r_revision_langrand_ie_mgn_results <- list("model"=NULL, #b1, # needed for later comparisons
+                                                                   "summary"=summary_mod, "hypotheses"=hyps, "hdi95"=hdi95, "cmp_to_null"=modcmp, 
+                                                                   "probs"=probs, "probs_text"=probs_text, "plot_prefix"=plot_prefix);
+  save(xling_brm_rs_logistic_mod_r_revision_langrand_ie_mgn_results, 
+       file=file_name, compress="xz", compression_level=9); # save this model
+} else
+{
+  load(file_name);
+}
+
+## ----results='hide', warning=FALSE, message=FALSE-----------------------------
+file_name <- "./cached/xling_replic_withoutr_langrand_ie.RData";
+if( !file.exists(file_name) )
+{
+  # cache these results:
+  
+  ## Frequentist ##
+  set.seed(314); # for replicability
+  m1 <- glmer(r ~ 1 + rough +
+                (1 | Language) +
+                (1 + rough | Family) +
+                (1 + rough | Area),
+              data=data_r_revision_other_rs_ie_1,
+              family=binomial(), 
+              control=glmerControl(optCtrl=list(maxfun=2e4), optimizer="bobyqa")); # boundary (singular) fit: see help('isSingular')
+  rePCA(m1); summary(m1); # seems to be the Area 
+  m2 <- update(m1, . ~ . - (1 + rough | Area) + (1 | Area)); rePCA(m2); summary(m2); anova(m1, m2); # ok, not singular...
+  m0 <- update(m2, . ~ . - rough); summary(m0); # singular fit, but probably not very problematic here
+  anova(m2, m0); # better than the null (p=0.01598, ΔAIC=-3.8)
+  plot_prefix <- "./figures/xling_brm_rs_logistic_mod_o_revision_langrand_ie_results";
+  plot_model(m2, type="pred", terms="rough"); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  xling_glmer_rs_logistic_mod_o_revision_langrand_ie_results <- list("model"=m2, # needed for later comparisons
+                                                                     "cmp_to_null"=anova(m2, m0), "plot_prefix"=plot_prefix);
+  
+  
+  ## Bayesian ##
+  # check the priors that we can set:
+  get_prior(r ~ 1 + rough +
+              (1 + rough | Language) +
+              (1 + rough | Family) +
+              (1 + rough | Area),
+            data=data_r_revision_other_rs_ie_1,
+            family="bernoulli");
+  # setting the priors:
+  b1_priors <- c(
+    brms::set_prior("student_t(5,0,2.5)", class = "b"),
+    brms::set_prior("student_t(5,0,2.5)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Language"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Area")
+  ); # for the full model
+  # prior predictive checks:
+  set.seed(314); # for replicability
+  b_prior <- brms::brm(r ~ 1 + rough +
+                         (1 + rough | Language) +
+                         (1 + rough | Family) +
+                         (1 + rough | Area),
+                       data=data_r_revision_other_rs_ie_1,
+                       prior=b1_priors,
+                       family="bernoulli",
+                       sample_prior='only',  # needed for prior predictive checks
+                       cores=brms_ncores, seed=314);
+  # save the results we need later on:
+  plot_prefix <- "./figures/xling_brm_rs_logistic_mod_o_revision_langrand_ie_results";
+  g <- arrangeGrob(pp_check(b_prior, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Prior predictive distribution of minimum values'),
+                   pp_check(b_prior, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Prior predictive distribution of means'),
+                   pp_check(b_prior, type='stat', stat='max') + xlab('p(r)') + ggtitle('Prior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min, even if the mean is a bit off but not much)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_prior_predictive_checks.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  
+  # fit the logistic model:
+  set.seed(314); # for replicability
+  b1 <- brms::brm(r ~ 1 + rough +
+                    (1 + rough | Language) +
+                    (1 + rough | Family) +
+                    (1 + rough | Area),
+                  data=data_r_revision_other_rs_ie_1,
+                  prior=b1_priors,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b1); mcmc_plot(b1, type="trace"); mcmc_plot(b1);
+  (hyps <- brms::hypothesis(b1, c("roughyes = 0", "roughyes > 0")));
+  (hdi95<- hdi(b1, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_full <- "./figures/xling_brm_rs_logistic_mod_o_revision_langrand_ie_results";
+  mcmc_plot(b1, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b1); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b1, type="pred", terms=c("rough")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod <- capture.output(summary(b1));
+  probs_text <- capture.output(probs <- logistic_summary(b1, dat=data_r_revision_other_rs_ie_1, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b1, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b1, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  
+  # model comparison with the null model:
+  b0_priors <- c(
+    brms::set_prior("student_t(5,0,2.5)", class = "Intercept"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Area")
+  ); # for the null model
+  b0 <- brms::brm(r ~ 1 +
+                    (1 | Language) + # language is nested within families so no need to include their interaction
+                    (1 | Family) +
+                    (1 | Area),
+                  data=data_r_revision_other_rs_ie_1,
+                  prior=b0_priors,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), seed=314); # adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b0); 
+  mcmc_plot(b0, type="trace"); 
+  mcmc_plot(b0);
+  b0 <- brms_fit_indices(b0);
+  b1 <- brms_fit_indices(b1, moment_match=TRUE);
+  (modcmp <- brms_compare_models(b0, b1, "[null]", "[+ 'rough']", bayes_factor=brms_bayes_factors)); # + rough clearly better than null
+  # --> clear positive effect of 'rough'
+  
+  
+  # compare with the default  priors (prior sensitivity check):
+  set.seed(314); # for replicability
+  b1f <- brms::brm(r ~ 1 + rough +
+                     (1 + rough | Language) +
+                     (1 + rough | Family) +
+                     (1 + rough | Area),
+                   data=data_r_revision_other_rs_ie_1,
+                   family="bernoulli",
+                   save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                   sample_prior=TRUE,  # needed for hypotheses tests
+                   cores=brms_ncores, seed=314);
+  summary(b1f); mcmc_plot(b1f, type="trace"); mcmc_plot(b1f);
+  (hyps_f <- brms::hypothesis(b1f, c("roughyes = 0", "roughyes > 0")));
+  (hdi95_f <- hdi(b1f, ci=0.95));
+  pp_check(b1f, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay');
+  g <- arrangeGrob(pp_check(b1f, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1f, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1f, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g);
+  b1f <- brms_fit_indices(b1f, moment_match=TRUE);
+  (modcmp_f <- brms_compare_models(b1, b1f, "[custom prior]", "[default prior]", bayes_factor=brms_bayes_factors)); # quite similar
+  
+  
+  # save the results we need later on:
+  xling_brm_rs_logistic_mod_o_revision_langrand_ie_results <- list("model"=NULL, #b1, # needed for later comparisons
+                                                                   "summary"=summary_mod, "hypotheses"=hyps, "hdi95"=hdi95, "cmp_to_null"=modcmp, 
+                                                                   "probs"=probs, "probs_text"=probs_text, "plot_prefix"=plot_prefix,
+                                                                   "cmp_to_default_prior"=modcmp_f, "hdi95__default_prior"=hdi95_f);
+  save(xling_brm_rs_logistic_mod_o_revision_langrand_ie_results, 
+       xling_glmer_rs_logistic_mod_o_revision_langrand_ie_results,
+       file=file_name, compress="xz", compression_level=9); # save this model
+} else
+{
+  load(file_name); 
+}
+
+## -----------------------------------------------------------------------------
+summary(xling_glmer_rs_logistic_mod_o_revision_langrand_ie_results$model);
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_rs_logistic_mod_o_revision_langrand_ie_results$summary,sep="\n"));
+
+## -----------------------------------------------------------------------------
+xling_brm_rs_logistic_mod_o_revision_langrand_ie_results$hypotheses;
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_rs_logistic_mod_o_revision_langrand_ie_results$probs_text,sep="\n"));
+
+## ----results='hide', warning=FALSE, message=FALSE-----------------------------
+file_name <- "./cached/xling_replic_withoutr_langrand_ie_mgn.RData";
+if( !file.exists(file_name) )
+{
+  # cache these results:
+
+  ## Bayesian ##
+  # prior predictive checks:
+  b1_priors_mgn <- c(
+    brms::set_prior("normal(0,3)", class = "b"),
+    brms::set_prior("normal(0,3)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Language"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Area")
+  ); # for the full model
+  set.seed(314); # for replicability
+  b_prior_mgn <- brms::brm(r ~ 1 + rough +
+                         (1 + rough | Language) +
+                         (1 + rough | Family) +
+                         (1 + rough | Area),
+                       data=data_r_revision_other_rs_ie_1,
+                       prior=b1_priors_mgn,
+                       family="bernoulli",
+                       sample_prior='only',  # needed for prior predictive checks
+                       cores=brms_ncores, seed=314);
+  # save the results we need later on:
+  plot_prefix <- "./figures/xling_brm_rs_logistic_mod_o_revision_langrand_ie_results_mgn";
+  g <- arrangeGrob(pp_check(b_prior_mgn, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Prior predictive distribution of minimum values'),
+                   pp_check(b_prior_mgn, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Prior predictive distribution of means'),
+                   pp_check(b_prior_mgn, type='stat', stat='max') + xlab('p(r)') + ggtitle('Prior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min, even if the mean is a bit off but not much)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_prior_predictive_checks.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  
+  # fit the logistic model:
+  set.seed(314); # for replicability
+  b1_mgn <- brms::brm(r ~ 1 + rough +
+                    (1 + rough | Language) +
+                    (1 + rough | Family) +
+                    (1 + rough | Area),
+                  data=data_r_revision_other_rs_ie_1,
+                  prior=b1_priors_mgn,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b1_mgn); mcmc_plot(b1_mgn, type="trace"); mcmc_plot(b1_mgn);
+  (hyps <- brms::hypothesis(b1_mgn, c("roughyes = 0", "roughyes > 0")));
+  (hdi95<- hdi(b1_mgn, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_full <- "./figures/xling_brm_rs_logistic_mod_o_revision_langrand_ie_results_mgn";
+  mcmc_plot(b1_mgn, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b1_mgn); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b1_mgn, type="pred", terms=c("rough")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod <- capture.output(summary(b1_mgn));
+  probs_text <- capture.output(probs <- logistic_summary(b1_mgn, dat=data_r_revision_other_rs_ie_1, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b1, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b1, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  
+  # model comparison with the null model:
+  b0_priors_mgn <- c(
+    brms::set_prior("normal(0,3)", class = "Intercept"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Area")
+  ); # for the null model
+  b0_mgn <- brms::brm(r ~ 1 +
+                    (1 | Language) + # language is nested within families so no need to include their interaction
+                    (1 | Family) +
+                    (1 | Area),
+                  data=data_r_revision_other_rs_ie_1,
+                  prior=b0_priors_mgn,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b0_mgn); 
+  mcmc_plot(b0_mgn, type="trace"); 
+  mcmc_plot(b0_mgn);
+  b0_mgn <- brms_fit_indices(b0_mgn);
+  b1_mgn <- brms_fit_indices(b1_mgn);
+  (modcmp <- brms_compare_models(b0_mgn, b1_mgn, "[null]", "[+ 'rough']", bayes_factor=brms_bayes_factors)); # + rough clearly better than null
+  # --> clear positive effect of 'rough'
+
+  
+  # save the results we need later on:
+  xling_brm_rs_logistic_mod_o_revision_langrand_ie_mgn_results <- list("model"=NULL, #b1, # needed for later comparisons
+                                                                   "summary"=summary_mod, "hypotheses"=hyps, "hdi95"=hdi95, "cmp_to_null"=modcmp, 
+                                                                   "probs"=probs, "probs_text"=probs_text, "plot_prefix"=plot_prefix);
+  save(xling_brm_rs_logistic_mod_o_revision_langrand_ie_mgn_results, 
+       file=file_name, compress="xz", compression_level=9); # save this model
+} else
+{
+  load(file_name);
+}
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_rs_logistic_mod_o_revision_langrand_ie_mgn_results$summary,sep="\n"));
+
+## -----------------------------------------------------------------------------
+xling_brm_rs_logistic_mod_o_revision_langrand_ie_mgn_results$hypotheses;
+
+## ----results='hide', warning=FALSE, message=FALSE-----------------------------
+file_name <- "./cached/xling_replic_omnibus_langrand_ie.RData";
+if( !file.exists(file_name) )
+{
+  # cache these results:
+  
+  ## Frequentist ##
+  set.seed(314); # for replicability
+  #m1 <- glmer(r ~ 1 + rough * Trill +
+  #              (1 + rough * Trill | Language) +
+  #              (1 + rough * Trill | Family) +
+  #              (1 + rough * Trill | Area),
+  #            data=data_full_revised_ie,
+  #            family=binomial()); 
+  # Error: number of observations (=590) < number of random effects (=1164) for term (1 + rough * Trill | Language); the random-effects parameters are probably unidentifiable
+  # let's simplify it:
+  m1 <- glmer(r ~ 1 + rough * Trill +
+                (1 + rough | Language) +
+                (1 + rough * Trill | Family) +
+                (1 + rough * Trill | Area),
+              data=data_full_revised_ie,
+              family=binomial(), control=glmerControl(optCtrl=list(maxfun=2e4), optimizer="bobyqa")); # boundary (singular) fit: see help('isSingular')
+  rePCA(m1); summary(m1); # seems to be the Area 
+  m2 <- update(m1, . ~ . - (1 + rough * Trill | Family) + (1 + rough + Trill | Family) - 
+                 (1 + rough + Trill | Family) +  + (1 + rough | Family) - 
+                 (1 + rough * Trill | Area) + (1 + rough + Trill | Area) - 
+                 (1 + rough + Trill | Area) + (1 + rough | Area) - 
+                 (1 + rough | Language) + (1 | Language) - 
+                 (1 + rough | Area) + (1 | Area) - 
+                 (1 | Area)); rePCA(m2); summary(m2); anova(m1, m2); # ok, not singular...
+  m0 <- glmer(r ~ 1 +
+                (1 | Language) +
+                (1 | Family) +
+                (1 | Area),
+              data=data_full_revised_ie,
+              family=binomial()); summary(m0); # singular fit, but probably not very problematic here
+  anova(m2, m0); # better than the null (p < 2.2e-16, ΔAIC=-97.2)
+  # bot it seems the interaction (and maybe even the Trill) do not really matter:
+  m3 <- update(m2, . ~ . - rough:Trill); summary(m3); anova(m2, m3); # p=0.2264
+  m4 <- update(m3, . ~ . - Trill); summary(m4); anova(m2, m4); # p=0.4806
+  # so, indeed, the Trill does not matter!
+  plot_prefix <- "./figures/xling_glmer_omnibus_mod_r_revision_langrand_ie";
+  plot_model(m4, type="pred", terms="rough"); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  plot_model(m2, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_full_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  xling_glmer_omnibus_mod_r_revision_langrand_ie_results <- list("model"=m4, # needed for later comparisons
+                                                                 "full_model"=m2,
+                                                                 "cmp_to_null"=anova(m4, m0), "cmp_to_full"=anova(m4, m2), "plot_prefix"=plot_prefix);
+  
+  
+  ## Bayesian ##
+  # check the priors that we can set:
+  get_prior(r ~ 1 + rough * Trill +
+              (1 + rough * Trill | Language) +
+              (1 + rough * Trill | Family) +
+              (1 + rough * Trill | Area),
+            data=data_full_revised_ie,
+            family="bernoulli");
+  # setting the priors:
+  b1_priors <- c(
+    brms::set_prior("student_t(5,0,2.5)", class = "b"),
+    brms::set_prior("student_t(5,0,2.5)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Language"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Trillyes", group="Language"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes:Trillyes", group="Language"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Trillyes", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes:Trillyes", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Area"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Trillyes", group="Area"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes:Trillyes", group="Area")
+  ); # for the full model
+  # prior predictive checks:
+  set.seed(314); # for replicability
+  b_prior <- brms::brm(r ~ 1 + rough * Trill +
+                         (1 + rough * Trill | Language) +
+                         (1 + rough * Trill | Family) +
+                         (1 + rough * Trill | Area),
+                       data=data_full_revised_ie,
+                       prior=b1_priors,
+                       family="bernoulli",
+                       sample_prior='only',  # needed for prior predictive checks
+                       cores=brms_ncores, seed=314);
+  # save the results we need later on:
+  plot_prefix <- "./figures/xling_brm_omnibus_mod_r_revision_langrand_full_ie";
+  g <- arrangeGrob(pp_check(b_prior, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Prior predictive distribution of minimum values'),
+                   pp_check(b_prior, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Prior predictive distribution of means'),
+                   pp_check(b_prior, type='stat', stat='max') + xlab('p(r)') + ggtitle('Prior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min, even if the mean is a bit off but not much)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_prior_predictive_checks.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  # fit the logistic model:
+  set.seed(314); # for replicability
+  b1 <- brms::brm(r ~ 1 + rough * Trill +
+                    (1 + rough * Trill | Language) +
+                    (1 + rough * Trill | Family) +
+                    (1 + rough * Trill | Area),
+                  data=data_full_revised_ie,
+                  prior=b1_priors,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, iter=3000, seed=314); # iter=3000 needed to deal with ESS too low
+  summary(b1); mcmc_plot(b1, type="trace"); mcmc_plot(b1);
+  (hyps_full <- brms::hypothesis(b1, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0", "roughyes:Trillyes = 0")));
+  (hdi95_full <- hdi(b1, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_full <- "./figures/xling_brm_omnibus_mod_r_revision_langrand_full_ie";
+  mcmc_plot(b1, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b1); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b1, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_full <- capture.output(summary(b1));
+  probs_text_full <- capture.output(probs_full <- logistic_summary(b1, dat=data_full_revised_ie, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b1, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b1, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  b1 <- brms_fit_indices(b1, moment_match=TRUE);
+  m_full <- b1;
+  
+  # model comparison with the null model:
+  b0_priors <- c(
+    brms::set_prior("student_t(5,0,2.5)", class = "Intercept"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Area")
+  ); # for the null model
+  b0 <- brms::brm(r ~ 1 +
+                    (1 | Language) +
+                    (1 | Family) +
+                    (1 | Area),
+                  data=data_full_revised_ie,
+                  prior=b0_priors,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b0); 
+  mcmc_plot(b0, type="trace"); 
+  mcmc_plot(b0);
+  b0 <- brms_fit_indices(b0);
+  (modcmp_0_full <- brms_compare_models(b0, m_full, "[null]", "[full]", bayes_factor=brms_bayes_factors)); # full is better than null
+  
+  
+  # following @winter_trilled_2022 observation "When the same model is fitted without by-Family random slopes over Trill, essentially the same results are obtained, but with narrower credible intervals" we also fit a model without these:
+  b2_priors <- c(
+    set_prior("student_t(5,0,2.5)", class = "b"),
+    set_prior("student_t(5,0,2.5)", class = "Intercept"),
+    set_prior("lkj(2)", class = "cor"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Language"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Language"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Family"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Family"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Area"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Area"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Trillyes", group="Area"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes:Trillyes", group="Area")
+  ); # no random slppes for Trill by Family
+  # prior predictive checks:
+  set.seed(314); # for replicability
+  plot_prefix <- plot_prefix_original <- "./figures/xling_brm_omnibus_mod_r_revision_langrand_original_ie";
+  b_prior <- brms::brm(r ~ 1 + rough * Trill +
+                         (1 + rough | Language) +
+                         (1 + rough | Family) +
+                         (1 + rough * Trill | Area),
+                       data=data_full_revised_ie,
+                       prior=b2_priors,
+                       family="bernoulli",
+                       sample_prior='only',  # needed for prior predictive checks
+                       cores=brms_ncores, seed=314);
+  g <- arrangeGrob(pp_check(b_prior, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Prior predictive distribution of minimum values'),
+                   pp_check(b_prior, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Prior predictive distribution of means'),
+                   pp_check(b_prior, type='stat', stat='max') + xlab('p(r)') + ggtitle('Prior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min, even if the mean is a bit off but not much)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_prior_predictive_checks.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  set.seed(314); # for replicability
+  b2 <- brms::brm(r ~ 1 + rough * Trill +
+                    (1 + rough | Language) +
+                    (1 + rough | Family) +
+                    (1 + rough * Trill | Area),
+                  data=data_full_revised_ie,
+                  prior=b2_priors,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b2); mcmc_plot(b2, type="trace"); mcmc_plot(b2);
+  (hyps_original <- brms::hypothesis(b2, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0", "roughyes:Trillyes = 0")));
+  (hdi95_original <- hdi(b2, ci=0.95));
+  m_original <- b2;
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_original <- "./figures/xling_brm_omnibus_mod_r_revision_langrand_original_ie";
+  mcmc_plot(b2, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b2); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b2, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_original <- capture.output(summary(b2));
+  probs_text_original <- capture.output(probs_original <- logistic_summary(b2, dat=data_full_revised_ie, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b2, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b2, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b2, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b2, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  # model comparisons
+  m_original <- brms_fit_indices(m_original, moment_match=TRUE);
+  (modcmp_0_original <- brms_compare_models(b0, m_original, "[null]", "[original]", bayes_factor=brms_bayes_factors)); # original is better than null
+  (modcmp_full_original <- brms_compare_models(m_full, m_original, "[full]", "[original]", bayes_factor=brms_bayes_factors)); # they seem at least identical, but the results are confusing...
+  # -> no reason to pick the original over the full here...
+  
+  
+  ## check if Trill:rough really matters (because it seems it might not):
+  b3_priors <- c(
+    set_prior("student_t(5,0,2.5)", class = "b"),
+    set_prior("student_t(5,0,2.5)", class = "Intercept"),
+    set_prior("lkj(2)", class = "cor"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Language"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Language"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Family"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Family"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Area"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Area"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Trillyes", group="Area")
+  ); # no interaction
+  set.seed(314); # for replicability
+  b3 <- brms::brm(r ~ 1 + rough + Trill +
+                    (1 + rough + Trill | Language) +
+                    (1 + rough + Trill | Family) +
+                    (1 + rough + Trill | Area),
+                  data=data_full_revised_ie,
+                  prior=b3_priors,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, iter=3000, seed=314); # iter=3000 needed to deal with ESS too low
+  summary(b3); mcmc_plot(b3, type="trace"); mcmc_plot(b3);
+  (hyps_noint <- brms::hypothesis(b3, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0")));
+  (hdi95_noint <- hdi(b3, ci=0.95));
+  m_noint <- b3;
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_noint <- "./figures/xling_brm_omnibus_mod_r_revision_langrand_noint_ie";
+  mcmc_plot(b3, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b3); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b3, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_noint <- capture.output(summary(b3));
+  probs_text_noint <- capture.output(probs_noint <- logistic_summary(b3, dat=data_full_revised_ie, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b3, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b3, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b3, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b3, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  # model comparisons
+  m_noint <- brms_fit_indices(m_noint, moment_match=TRUE);
+  (modcmp_0_noint <- brms_compare_models(b0, m_noint, "[null]", "[noint]", bayes_factor=brms_bayes_factors)); # noint is better than null
+  (modcmp_full_noint <- brms_compare_models(m_full, m_noint, "[full]", "[noint]", bayes_factor=brms_bayes_factors)); # they seem largely equivalent with a hint that noint is better
+  (modcmp_original_noint <- brms_compare_models(m_original, m_noint, "[original]", "[noint]", bayes_factor=brms_bayes_factors)); # they are mostly equivalent,but original might be better
+  # -> we can probably remove the interaction Trill:rough...
+
+
+  # check if Trill is needed at all (because it seems it might not):
+  b4_priors <- c(
+    set_prior("student_t(5,0,2.5)", class = "b"),
+    set_prior("student_t(5,0,2.5)", class = "Intercept"),
+    set_prior("lkj(2)", class = "cor"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Language"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Language"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Family"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Family"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "Intercept", group="Area"),
+    set_prior("student_t(4,0,2)", class = "sd", coef = "roughyes", group="Area")
+  ); # no Trill
+  set.seed(314); # for replicability
+  b4 <- brms::brm(r ~ 1 + rough +
+                    (1 + rough | Language) +
+                    (1 + rough | Family) +
+                    (1 + rough | Area),
+                  data=data_full_revised_ie,
+                  prior=b4_priors,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), seed=314); # adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b4); mcmc_plot(b4, type="trace"); mcmc_plot(b4);
+  (hyps_notrill <- brms::hypothesis(b4, c("roughyes = 0", "roughyes > 0")));
+  (hdi95_notrill <- hdi(b4, ci=0.95));
+  m_notrill <- b4;
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_notrill <- "./figures/xling_brm_omnibus_mod_r_revision_langrand_notrill_ie";
+  mcmc_plot(b4, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b4); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b4, type="pred", terms=c("rough")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_notrill <- capture.output(summary(b4));
+  probs_text_notrill <- capture.output(probs_notrill <- logistic_summary(b4, dat=data_full_revised_ie, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b4, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b4, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b4, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b4, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  # model comparisons
+  m_notrill <- brms_fit_indices(m_notrill, moment_match=TRUE);
+  (modcmp_0_notrill <- brms_compare_models(b0, m_notrill, "[null]", "[notrill]", bayes_factor=brms_bayes_factors)); # notrill is better than null
+  (modcmp_full_notrill <- brms_compare_models(m_full, m_notrill, "[full]", "[notrill]", bayes_factor=brms_bayes_factors)); # comparable, with a hint that full is worse
+  (modcmp_original_notrill <- brms_compare_models(m_original, m_notrill, "[original]", "[notrill]", bayes_factor=brms_bayes_factors)); # they are relatively equivalent but with a hint that notrill is better
+  (modcmp_noint_notrill <- brms_compare_models(m_noint, m_notrill, "[noint]", "[notrill]", bayes_factor=brms_bayes_factors)); # they are equivalent
+  # -> so, Trill is not needed apparently...
+
+  
+  # compare with the default  priors (prior sensitivity check):
+  set.seed(314); # for replicability
+  b1f <- brms::brm(r ~ 1 + rough * Trill +
+                     (1 + rough * Trill | Language) +
+                     (1 + rough * Trill | Family) +
+                     (1 + rough * Trill | Area),
+                   data=data_full_revised_ie,
+                   family="bernoulli",
+                   save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                   sample_prior=TRUE,  # needed for hypotheses tests
+                   cores=brms_ncores, iter=3000, seed=314); # iter=3000 needed to deal with ESS too low
+  summary(b1f); mcmc_plot(b1f, type="trace"); mcmc_plot(b1f);
+  (hyps_f <- brms::hypothesis(b1f, c("roughyes = 0", "roughyes > 0")));
+  (hdi95_f <- hdi(b1f, ci=0.95));
+  pp_check(b1f, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay');
+  g <- arrangeGrob(pp_check(b1f, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1f, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1f, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g);
+  b1f <- brms_fit_indices(b1f, moment_match=TRUE);
+  (modcmp_f <- brms_compare_models(m_full, b1f, "[custom prior]", "[default prior]", bayes_factor=brms_bayes_factors)); # contradicting results, but seem comparable...
+  
+  
+  # save the results:
+  xling_brm_omnibus_mod_r_revision_langrand_ie_results <- list("full"=list("model"=NULL, #m_full, # needed for later comparisons
+                                                                           "summary"=summary_mod_full, "hypotheses"=hyps_full, "hdi95"=hdi95_full, 
+                                                                           "cmp_to_null"=modcmp_0_full, "probs"=probs_full, "probs_text"=probs_text_full, "plot_prefix"=plot_prefix_full),
+                                                               "original"=list("model"=NULL, #m_original, # needed for later comparisons
+                                                                               "summary"=summary_mod_original, "hypotheses"=hyps_original, "hdi95"=hdi95_original, 
+                                                                               "cmp_to_null"=modcmp_0_original,  "cmp_to_full"=modcmp_full_original,
+                                                                               "probs"=probs_original, "probs_text"=probs_text_original, "plot_prefix"=plot_prefix_original),
+                                                               "noint"=list("model"=NULL, #m_noint, # needed for later comparisons
+                                                                            "summary"=summary_mod_noint, "hypotheses"=hyps_noint, "hdi95"=hdi95_noint, 
+                                                                            "cmp_to_null"=modcmp_0_noint,  "cmp_to_full"=modcmp_full_noint, "probs"=probs_noint, "probs_text"=probs_text_noint, "plot_prefix"=plot_prefix_noint),
+                                                               "notrill"=list("model"=NULL, #m_notrill, # needed for later comparisons
+                                                                              "summary"=summary_mod_notrill, "hypotheses"=hyps_notrill, "hdi95"=hdi95_notrill, 
+                                                                              "cmp_to_null"=modcmp_0_notrill,  "cmp_to_full"=modcmp_full_notrill, "cmp_to_noint"=modcmp_noint_notrill, 
+                                                                              "probs"=probs_notrill, "probs_text"=probs_text_notrill, "plot_prefix"=plot_prefix_notrill),
+                                                               "full_default_priors"=list("hypotheses"=hyps_f, "hdi95"=hdi95_f, "modcmp"=modcmp_f));
+  save(xling_brm_omnibus_mod_r_revision_langrand_ie_results,
+       xling_glmer_omnibus_mod_r_revision_langrand_ie_results,
+       file=file_name, compress="xz", compression_level=9); # save this model
+} else
+{
+  load(file_name);
+}
+
+## -----------------------------------------------------------------------------
+summary(xling_glmer_omnibus_mod_r_revision_langrand_ie_results$full_model);
+
+## -----------------------------------------------------------------------------
+summary(xling_glmer_omnibus_mod_r_revision_langrand_ie_results$model);
+
+## -----------------------------------------------------------------------------
+xling_glmer_omnibus_mod_r_revision_langrand_ie_results$cmp_to_null;
+
+## -----------------------------------------------------------------------------
+xling_glmer_omnibus_mod_r_revision_langrand_ie_results$cmp_to_full;
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_omnibus_mod_r_revision_langrand_ie_results$full$summary,sep="\n"));
+xling_brm_omnibus_mod_r_revision_langrand_ie_results$full$hypotheses;
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_omnibus_mod_r_revision_langrand_ie_results$full$probs_text,sep="\n"));
+
+## -----------------------------------------------------------------------------
+cat("Custom priors:\n"); xling_brm_omnibus_mod_r_revision_langrand_ie_results$full$hdi95;
+cat("\n\nDefault priors:\n"); xling_brm_omnibus_mod_r_revision_langrand_ie_results$full_default_priors$hdi95;
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_omnibus_mod_r_revision_langrand_ie_results$full$probs_text,sep="\n"));
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_omnibus_mod_r_revision_langrand_ie_results$noint$summary,sep="\n"));
+xling_brm_omnibus_mod_r_revision_langrand_ie_results$noint$hypotheses;
+
+## ----results='hide', warning=FALSE, message=FALSE-----------------------------
+file_name <- "./cached/xling_replic_omnibus_langrand_ie_mgn.RData";
+if( !file.exists(file_name) )
+{
+  # cache these results:
+
+  ## Bayesian ##
+  # prior predictive checks:
+  b1_priors_mgn <- c(
+    brms::set_prior("normal(0,3)", class = "b"),
+    brms::set_prior("normal(0,3)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Language"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Trillyes", group="Language"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes:Trillyes", group="Language"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Trillyes", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes:Trillyes", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Area"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Trillyes", group="Area"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "roughyes:Trillyes", group="Area")
+  ); # for the full model
+  set.seed(314); # for replicability
+  b_prior_mgn <- brms::brm(r ~ 1 + rough * Trill +
+                         (1 + rough * Trill | Language) +
+                         (1 + rough * Trill | Family) +
+                         (1 + rough * Trill | Area),
+                       data=data_full_revised_ie,
+                       prior=b1_priors_mgn,
+                       family="bernoulli",
+                       sample_prior='only',  # needed for prior predictive checks
+                       cores=brms_ncores, seed=314);
+  # save the results we need later on:
+  plot_prefix <- "./figures/xling_brm_omnibus_mod_r_revision_langrand_full_ie_mgn";
+  g <- arrangeGrob(pp_check(b_prior_mgn, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Prior predictive distribution of minimum values'),
+                   pp_check(b_prior_mgn, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Prior predictive distribution of means'),
+                   pp_check(b_prior_mgn, type='stat', stat='max') + xlab('p(r)') + ggtitle('Prior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min, even if the mean is a bit off but not much)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_prior_predictive_checks.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  # fit the logistic model:
+  set.seed(314); # for replicability
+  b1_mgn <- brms::brm(r ~ 1 + rough * Trill +
+                    (1 + rough * Trill | Language) +
+                    (1 + rough * Trill | Family) +
+                    (1 + rough * Trill | Area),
+                  data=data_full_revised_ie,
+                  prior=b1_priors_mgn,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, iter=3000, seed=314); # iter=3000 needed to deal with ESS too low
+  summary(b1_mgn); mcmc_plot(b1_mgn, type="trace"); mcmc_plot(b1_mgn);
+  (hyps_full <- brms::hypothesis(b1_mgn, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0", "roughyes:Trillyes = 0")));
+  (hdi95_full <- hdi(b1_mgn, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_full <- "./figures/xling_brm_omnibus_mod_r_revision_langrand_full_ie_mgn";
+  mcmc_plot(b1_mgn, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b1_mgn); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b1_mgn, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_full <- capture.output(summary(b1_mgn));
+  probs_text_full <- capture.output(probs_full <- logistic_summary(b1_mgn, dat=data_full_revised_ie, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b1_mgn, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b1_mgn, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1_mgn, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1_mgn, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  b1_mgn <- brms_fit_indices(b1_mgn, moment_match=TRUE);
+  m_full_mgn <- b1_mgn;
+  
+  # model comparison with the null model:
+  b0_priors_mgn <- c(
+    brms::set_prior("normal(0,3)", class = "Intercept"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Area")
+  ); # for the null model
+  b0_mgn <- brms::brm(r ~ 1 +
+                    (1 | Language) +
+                    (1 | Family) +
+                    (1 | Area),
+                  data=data_full_revised_ie,
+                  prior=b0_priors_mgn,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b0_mgn); 
+  mcmc_plot(b0_mgn, type="trace"); 
+  mcmc_plot(b0_mgn);
+  b0_mgn <- brms_fit_indices(b0_mgn);
+  (modcmp_0_full <- brms_compare_models(b0_mgn, m_full_mgn, "[null]", "[full]", bayes_factor=brms_bayes_factors)); # full is better than null
+  
+  
+  # following @winter_trilled_2022 observation "When the same model is fitted without by-Family random slopes over Trill, essentially the same results are obtained, but with narrower credible intervals" we also fit a model without these:
+  b2_priors_mgn <- c(
+    set_prior("normal(0,3)", class = "b"),
+    set_prior("normal(0,3)", class = "Intercept"),
+    set_prior("lkj(2)", class = "cor"),
+    set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Language"),
+    set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Language"),
+    set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Family"),
+    set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Family"),
+    set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Area"),
+    set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Area"),
+    set_prior("exponential(4)", class = "sd", coef = "Trillyes", group="Area"),
+    set_prior("exponential(4)", class = "sd", coef = "roughyes:Trillyes", group="Area")
+  ); # no random slppes for Trill by Family
+  # prior predictive checks:
+  set.seed(314); # for replicability
+  plot_prefix <- plot_prefix_original <- "./figures/xling_brm_omnibus_mod_r_revision_langrand_original_ie_mgn";
+  b_prior_mgn <- brms::brm(r ~ 1 + rough * Trill +
+                         (1 + rough | Language) +
+                         (1 + rough | Family) +
+                         (1 + rough * Trill | Area),
+                       data=data_full_revised_ie,
+                       prior=b2_priors_mgn,
+                       family="bernoulli",
+                       sample_prior='only',  # needed for prior predictive checks
+                       cores=brms_ncores, seed=314);
+  g <- arrangeGrob(pp_check(b_prior_mgn, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Prior predictive distribution of minimum values'),
+                   pp_check(b_prior_mgn, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Prior predictive distribution of means'),
+                   pp_check(b_prior_mgn, type='stat', stat='max') + xlab('p(r)') + ggtitle('Prior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min, even if the mean is a bit off but not much)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_prior_predictive_checks.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  set.seed(314); # for replicability
+  b2_mgn <- brms::brm(r ~ 1 + rough * Trill +
+                    (1 + rough | Language) +
+                    (1 + rough | Family) +
+                    (1 + rough * Trill | Area),
+                  data=data_full_revised_ie,
+                  prior=b2_priors_mgn,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, iter=3000, control=list(adapt_delta=0.99), seed=314); # adapt_delta=0.99 needed to avoid divergent transition(s); iter=3000 is needed to deal with ESS is too low
+  summary(b2_mgn); mcmc_plot(b2_mgn, type="trace"); mcmc_plot(b2_mgn);
+  (hyps_original <- brms::hypothesis(b2_mgn, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0", "roughyes:Trillyes = 0")));
+  (hdi95_original <- hdi(b2_mgn, ci=0.95));
+  m_original_mgn <- b2_mgn;
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_original <- "./figures/xling_brm_omnibus_mod_r_revision_langrand_original_ie_mgn";
+  mcmc_plot(b2_mgn, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b2_mgn); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b2_mgn, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_original <- capture.output(summary(b2_mgn));
+  probs_text_original <- capture.output(probs_original <- logistic_summary(b2_mgn, dat=data_full_revised_ie, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b2_mgn, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b2_mgn, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b2_mgn, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b2_mgn, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  # model comparisons
+  m_original_mgn <- brms_fit_indices(m_original_mgn);
+  (modcmp_0_original <- brms_compare_models(b0_mgn, m_original_mgn, "[null]", "[original]", bayes_factor=brms_bayes_factors)); # original is better than null
+  (modcmp_full_original <- brms_compare_models(m_full_mgn, m_original_mgn, "[full]", "[original]", bayes_factor=brms_bayes_factors)); # virtually identical
+  # -> no reason to pick the original over the full here...
+  
+  
+  ## check if Trill:rough really matters (because it seems it might not):
+  b3_priors_mgn <- c(
+    set_prior("normal(0,3)", class = "b"),
+    set_prior("normal(0,3)", class = "Intercept"),
+    set_prior("lkj(2)", class = "cor"),
+    set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Language"),
+    set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Language"),
+    set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Family"),
+    set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Family"),
+    set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Area"),
+    set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Area"),
+    set_prior("exponential(4)", class = "sd", coef = "Trillyes", group="Area")
+  ); # no interaction
+  set.seed(314); # for replicability
+  b3_mgn <- brms::brm(r ~ 1 + rough + Trill +
+                    (1 + rough + Trill | Language) +
+                    (1 + rough + Trill | Family) +
+                    (1 + rough + Trill | Area),
+                  data=data_full_revised_ie,
+                  prior=b3_priors_mgn,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, iter=3000, seed=314); # iter=3000 is needed to deal with ESS is too low
+  summary(b3_mgn); mcmc_plot(b3_mgn, type="trace"); mcmc_plot(b3_mgn);
+  (hyps_noint <- brms::hypothesis(b3_mgn, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0")));
+  (hdi95_noint <- hdi(b3_mgn, ci=0.95));
+  m_noint_mgn <- b3_mgn;
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_noint <- "./figures/xling_brm_omnibus_mod_r_revision_langrand_noint_ie_mgn";
+  mcmc_plot(b3_mgn, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b3_mgn); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b3_mgn, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_noint <- capture.output(summary(b3_mgn));
+  probs_text_noint <- capture.output(probs_noint <- logistic_summary(b3_mgn, dat=data_full_revised_ie, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b3_mgn, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b3_mgn, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b3_mgn, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b3_mgn, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  # model comparisons
+  m_noint_mgn <- brms_fit_indices(m_noint_mgn);
+  (modcmp_0_noint <- brms_compare_models(b0_mgn, m_noint_mgn, "[null]", "[noint]", bayes_factor=brms_bayes_factors)); # noint is better than null
+  (modcmp_full_noint <- brms_compare_models(m_full_mgn, m_noint_mgn, "[full]", "[noint]", bayes_factor=brms_bayes_factors)); # equivalent
+  (modcmp_original_noint <- brms_compare_models(m_original_mgn, m_noint_mgn, "[original]", "[noint]", bayes_factor=brms_bayes_factors)); # mostly equivalent, with a hint that noint is better
+  # -> we can probably remove the interaction Trill:rough...
+
+
+  # check if Trill is needed at all (because it seems it might not):
+  b4_priors_mgn <- c(
+    set_prior("normal(0,3)", class = "b"),
+    set_prior("normal(0,3)", class = "Intercept"),
+    set_prior("lkj(2)", class = "cor"),
+    set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Language"),
+    set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Language"),
+    set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Family"),
+    set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Family"),
+    set_prior("exponential(4)", class = "sd", coef = "Intercept", group="Area"),
+    set_prior("exponential(4)", class = "sd", coef = "roughyes", group="Area")
+  ); # no Trill
+  set.seed(314); # for replicability
+  b4_mgn <- brms::brm(r ~ 1 + rough +
+                    (1 + rough | Language) +
+                    (1 + rough | Family) +
+                    (1 + rough | Area),
+                  data=data_full_revised_ie,
+                  prior=b4_priors_mgn,
+                  family="bernoulli",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, iter=3000, control=list(adapt_delta=0.99), seed=314); # adapt_delta=0.99 needed to avoid divergent transition(s); iter=3000 is needed to deal with ESS is too low
+  summary(b4_mgn); mcmc_plot(b4_mgn, type="trace"); mcmc_plot(b4_mgn);
+  (hyps_notrill <- brms::hypothesis(b4_mgn, c("roughyes = 0", "roughyes > 0")));
+  (hdi95_notrill <- hdi(b4_mgn, ci=0.95));
+  m_notrill_mgn <- b4_mgn;
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_notrill <- "./figures/xling_brm_omnibus_mod_r_revision_langrand_notrill_ie_mgn";
+  mcmc_plot(b4_mgn, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b4_mgn); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b4_mgn, type="pred", terms=c("rough")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_notrill <- capture.output(summary(b4_mgn));
+  probs_text_notrill <- capture.output(probs_notrill <- logistic_summary(b4_mgn, dat=data_full_revised_ie, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b4_mgn, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b4_mgn, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b4_mgn, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b4_mgn, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  # model comparisons
+  m_notrill_mgn <- brms_fit_indices(m_notrill_mgn);
+  (modcmp_0_notrill <- brms_compare_models(b0_mgn, m_notrill_mgn, "[null]", "[notrill]", bayes_factor=brms_bayes_factors)); # notrill is better than null
+  (modcmp_full_notrill <- brms_compare_models(m_full_mgn, m_notrill_mgn, "[full]", "[notrill]", bayes_factor=brms_bayes_factors)); # comparable, with a hint that full is worse
+  (modcmp_original_notrill <- brms_compare_models(m_original_mgn, m_notrill_mgn, "[original]", "[notrill]", bayes_factor=brms_bayes_factors)); # notrill is better
+  (modcmp_noint_notrill <- brms_compare_models(m_noint_mgn, m_notrill_mgn, "[noint]", "[notrill]", bayes_factor=brms_bayes_factors)); # notrill is better
+  # -> so, Trill is not needed apparently...
+
+  
+  # save the results:
+  xling_brm_omnibus_mod_r_revision_langrand_ie_mgn_results <- list("full"=list("model"=NULL, #m_full, # needed for later comparisons
+                                                                           "summary"=summary_mod_full, "hypotheses"=hyps_full, "hdi95"=hdi95_full, 
+                                                                           "cmp_to_null"=modcmp_0_full, "probs"=probs_full, "probs_text"=probs_text_full, "plot_prefix"=plot_prefix_full),
+                                                               "original"=list("model"=NULL, #m_original, # needed for later comparisons
+                                                                               "summary"=summary_mod_original, "hypotheses"=hyps_original, "hdi95"=hdi95_original, 
+                                                                               "cmp_to_null"=modcmp_0_original,  "cmp_to_full"=modcmp_full_original,
+                                                                               "probs"=probs_original, "probs_text"=probs_text_original, "plot_prefix"=plot_prefix_original),
+                                                               "noint"=list("model"=NULL, #m_noint, # needed for later comparisons
+                                                                            "summary"=summary_mod_noint, "hypotheses"=hyps_noint, "hdi95"=hdi95_noint, 
+                                                                            "cmp_to_null"=modcmp_0_noint,  "cmp_to_full"=modcmp_full_noint, "probs"=probs_noint, "probs_text"=probs_text_noint, "plot_prefix"=plot_prefix_noint),
+                                                               "notrill"=list("model"=NULL, #m_notrill, # needed for later comparisons
+                                                                              "summary"=summary_mod_notrill, "hypotheses"=hyps_notrill, "hdi95"=hdi95_notrill, 
+                                                                              "cmp_to_null"=modcmp_0_notrill,  "cmp_to_full"=modcmp_full_notrill, "cmp_to_noint"=modcmp_noint_notrill, 
+                                                                              "probs"=probs_notrill, "probs_text"=probs_text_notrill, "plot_prefix"=plot_prefix_notrill));
+  save(xling_brm_omnibus_mod_r_revision_langrand_ie_mgn_results,
+       file=file_name, compress="xz", compression_level=9); # save this model
+} else
+{
+  load(file_name);
+}
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_omnibus_mod_r_revision_langrand_ie_results$notrill$summary,sep="\n"));
+xling_brm_omnibus_mod_r_revision_langrand_ie_results$notrill$hypotheses;
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(xling_brm_omnibus_mod_r_revision_langrand_ie_mgn_results$notrill$summary,sep="\n"));
+xling_brm_omnibus_mod_r_revision_langrand_ie_mgn_results$notrill$hypotheses;
+
+## -----------------------------------------------------------------------------
+# Try to load the data:
+if( !file.exists("./data/rough_r_data_IE_length.csv") )
+{
+  stop("Please first run the Ptyhon script ./ComputeFormLength/ComputeFormLength.py to generate the file ./data/rough_r_data_IE_length.csv!");
+}
+data_full_revised_allmeanings_ie_length <- read.csv("./data/rough_r_data_IE_length.csv");
+
+# Select the recoded languages:
+data_full_revised_allmeanings_ie_length <- data_full_revised_allmeanings_ie_length %>%
+  dplyr::filter(!is.na(revision)) %>% 
+  dplyr::mutate(Trill=ifelse(revision=="other","no",
+                             ifelse(revision=="trilled","yes",NA))) %>% 
+  dplyr::filter(!is.na(Trill));
+
+# recode as factors:
+data_full_revised_allmeanings_ie_length$rough <- factor(c("no", "yes")[as.numeric(data_full_revised_allmeanings_ie_length$rough == "True")+1], levels=c("no", "yes"));
+data_full_revised_allmeanings_ie_length$Trill <- factor(data_full_revised_allmeanings_ie_length$Trill,                               levels=c("no", "yes"));
+
+# Let's see if there's any difference in word length between "rough" and "smooth":
+hist(data_full_revised_allmeanings_ie_length$CleanFormLength); # seems count to me -> Poisson regression but we need to subtract the minimum length to make it really Poisson:
+data_full_revised_allmeanings_ie_length$cfl2 <- (data_full_revised_allmeanings_ie_length$CleanFormLength - min(data_full_revised_allmeanings_ie_length$CleanFormLength, na.rm=TRUE));
+hist(data_full_revised_allmeanings_ie_length$CleanFormNormLength); # seems count to me -> Poisson regression but we need to subtract the minimum length to make it really Poisson:
+data_full_revised_allmeanings_ie_length$cfln2 <- (data_full_revised_allmeanings_ie_length$CleanFormNormLength - min(data_full_revised_allmeanings_ie_length$CleanFormNormLength, na.rm=TRUE));
+
+# the 'strict' meanings:
+data_full_revised_ie_length <- merge(data_full_revised_ie, 
+                                     unique(data_full_revised_allmeanings_ie_length[ data_full_revised_allmeanings_ie_length$Meaning %in% c("rough","smooth"), 
+                                                                                     c("Language", "ISO_code", "Form", "CleanForm", "CleanFormLength", "Form_norm", "CleanFormNorm", "CleanFormNormLength", "cfl2", "cfln2")]), 
+                                     by=c("Language", "ISO_code", "Form"), all.x=TRUE, all.y=FALSE); # CleanFormLength is a rough estimation of word length
+
+## ----fig.width=3*5, fig.height=2*5, fig.cap=capFig("Distribution of clear form (top) and the normalised clean form (bottom) length overall (left), by 'rough' (center) and by 'trill' (right).")----
+grid.arrange(ggplot(data_full_revised_allmeanings_ie_length, aes(CleanFormLength)) + 
+               geom_histogram(binwidth=1, color="black", fill="gray80") + 
+               NULL,
+             ggplot(data_full_revised_allmeanings_ie_length, aes(CleanFormLength)) + 
+               geom_histogram(binwidth=1, aes(fill=rough), alpha=0.5, color="black") + 
+               NULL,
+             ggplot(data_full_revised_allmeanings_ie_length, aes(CleanFormLength)) + 
+               geom_histogram(binwidth=1, aes(fill=Trill), alpha=0.5, color="black") + 
+               NULL,
+             
+             ggplot(data_full_revised_allmeanings_ie_length, aes(CleanFormNormLength)) + 
+               geom_histogram(binwidth=1, color="black", fill="gray80") + 
+               NULL,
+             ggplot(data_full_revised_allmeanings_ie_length, aes(CleanFormNormLength)) + 
+               geom_histogram(binwidth=1, aes(fill=rough), alpha=0.5, color="black") + 
+               NULL,
+             ggplot(data_full_revised_allmeanings_ie_length, aes(CleanFormNormLength)) + 
+               geom_histogram(binwidth=1, aes(fill=Trill), alpha=0.5, color="black") + 
+               NULL,
+             
+             ncol=3);
+
+## ----results='hide', warning=FALSE, message=FALSE-----------------------------
+file_name <- "./cached/formlength_rough_trill.RData";
+if( !file.exists(file_name) )
+{
+  # cache these results:
+  
+  ## CleanFormLength:
+  
+  ## Frequentist ##
+  set.seed(314); # for replicability
+  m_full <- glmer(cfl2 ~ 1 + rough * Trill +
+                    (1 + rough * Trill | Language) +
+                    (1 + rough * Trill | Family) +
+                    (1 + rough * Trill | Area),
+                  data=data_full_revised_allmeanings_ie_length,
+                  family=poisson(), 
+                  control=glmerControl(optCtrl=list(maxfun=2e4), optimizer="bobyqa")); # the full model -> boundary (singular) fit
+  rePCA(m_full); summary(m_full);
+  m1 <- update(m_full, . ~ . - (1 + rough * Trill | Language) + (1 + rough + Trill | Language) - 
+                 (1 + rough * Trill | Family) + (1 + rough + Trill | Family) - 
+                 (1 + rough * Trill | Area) + (1 + rough + Trill | Area) - 
+                 (1 + rough + Trill | Family) + (1 + rough | Family) - 
+                 (1 + rough + Trill | Language) + (1 + rough | Language) - 
+                 (1 + rough | Language) + (1 | Language) - 
+                 (1 + rough + Trill | Area) + (1 + rough | Area) - 
+                 (1 + rough | Family) + (1 | Family) - 
+                 (1 + rough | Area) + (1 | Area) - 
+                 (1 | Area)); rePCA(m1); summary(m1); anova(m1, m_full);
+  m2 <- update(m1, . ~ . - rough:Trill); summary(m2); anova(m2, m1); # the interaction does not matter (p=0.56)
+  m3 <- update(m2, . ~ . - Trill); summary(m3); anova(m3, m1); # Trill does not matter (p=0.69)
+  m0 <- update(m3, . ~ . - rough); summary(m0); # the null model
+  # so, only rough has a positive effect on the length...
+  formlength_rough_trill_glmer <- list("model"=m3, "full_model"=m1, 
+                                       "cmp_to_null"=anova(m3, m0), "cmp_to_full"=anova(m3, m1));
+  
+  
+  ## Bayesian ##
+  # check the priors that we can set:
+  get_prior(cfl2 ~ 1 + rough * Trill +
+              (1 + rough * Trill | Language) +
+              (1 + rough * Trill | Family) +
+              (1 + rough * Trill | Area),
+            data=data_full_revised_allmeanings_ie_length,
+            family="poisson");
+  # setting the priors:
+  b1_priors <- c(
+    brms::set_prior("normal(0, 0.5)", class = "b"),
+    brms::set_prior("normal(0, 0.5)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Trillyes", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes:Trillyes", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Trillyes", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes:Trillyes", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Area"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Trillyes", group="Area"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes:Trillyes", group="Area")
+  ); # for the full model
+  # prior predictive checks:
+  set.seed(314); # for replicability
+  b_prior <- brms::brm(cfl2 ~ 1 + rough * Trill +
+                         (1 + rough * Trill | Language) +
+                         (1 + rough * Trill | Family) +
+                         (1 + rough * Trill | Area),
+                       data=data_full_revised_allmeanings_ie_length,
+                       prior=b1_priors,
+                       family="poisson",
+                       sample_prior='only',  # needed for prior predictive checks
+                       cores=brms_ncores, seed=413);
+  # save the results we need later on:
+  plot_prefix <- "./figures/formlength_rough_trill_full";
+  g <- arrangeGrob(pp_check(b_prior, type='stat', sta ='min') + xlab('form length') + ggtitle('Prior predictive distribution of minimum values'),
+                   pp_check(b_prior, type='stat', stat='mean') + xlab('form length') + ggtitle('Prior predictive distribution of means'),
+                   pp_check(b_prior, type='stat', stat='max') + xlab('form length') + ggtitle('Prior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min, even if the mean is a bit off but not much)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_prior_predictive_checks.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  # fit the logistic model:
+  set.seed(314); # for replicability
+  b1 <- brms::brm(cfl2 ~ 1 + rough * Trill +
+                    (1 + rough * Trill | Language) +
+                    (1 + rough * Trill | Family) +
+                    (1 + rough * Trill | Area),
+                  data=data_full_revised_allmeanings_ie_length,
+                  prior=b1_priors,
+                  family="poisson",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, iter=3000, control=list(adapt_delta=0.99), seed=413); # adapt_delta=0.99 needed to deal with divergent transition(s); iter=3000 needed to deal with ESS too low
+  summary(b1); mcmc_plot(b1, type="trace"); mcmc_plot(b1);
+  (hyps_full <- brms::hypothesis(b1, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0", "roughyes:Trillyes = 0")));
+  (hdi95_full <- hdi(b1, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_full <- "./figures/formlength_rough_trill_full";
+  mcmc_plot(b1, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b1, variable="^b_", regex=TRUE); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b1, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_full <- capture.output(summary(b1));
+  probs_text_full <- capture.output(probs_full <- logistic_summary(b1, dat=data_full_revised_allmeanings_ie_length, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b1, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b1, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  b1 <- brms_fit_indices(b1, moment_match=TRUE);
+  m_full <- b1;
+
+  # model comparison with the null model:
+  b0_priors <- c(
+    brms::set_prior("normal(0, 0.5)", class = "Intercept"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Area")
+  ); # for the null model
+  b0 <- brms::brm(cfl2 ~ 1 +
+                    (1 | Language) +
+                    (1 | Family) +
+                    (1 | Area),
+                  data=data_full_revised_allmeanings_ie_length,
+                  prior=b0_priors,
+                  family="poisson",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), seed=413); # adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b0); 
+  mcmc_plot(b0, type="trace"); 
+  mcmc_plot(b0);
+  b0 <- brms_fit_indices(b0, moment_match=TRUE);
+  (modcmp_0_full <- brms_compare_models(b0, m_full, "[null]", "[full]", bayes_factor=brms_bayes_factors)); # quite similar, with a hint that full might be better (KFOLD)
+  
+  # let's see if the interaction matters:
+  b2_priors <- c(
+    brms::set_prior("normal(0, 0.5)", class = "b"),
+    brms::set_prior("normal(0, 0.5)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Trillyes", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Trillyes", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Area"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Trillyes", group="Area")
+  ); # no interaction
+  set.seed(314); # for replicability
+  b2 <- brms::brm(cfl2 ~ 1 + rough + Trill +
+                    (1 + rough + Trill | Language) +
+                    (1 + rough + Trill | Family) +
+                    (1 + rough + Trill | Area),
+                  data=data_full_revised_allmeanings_ie_length,
+                  prior=b2_priors,
+                  family="poisson",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, iter=3000, control=list(adapt_delta=0.99), seed=413); # adapt_delta=0.99 needed to deal with divergent transition(s); iter=3000 needed to deal with ESS too low
+  summary(b2); mcmc_plot(b2, type="trace"); mcmc_plot(b2);
+  (hyps_noint <- brms::hypothesis(b2, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0")));
+  (hdi95_noint <- hdi(b2, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_noint <- "./figures/formlength_rough_trill_full_noint";
+  mcmc_plot(b2, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b2); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b2, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_noint <- capture.output(summary(b2));
+  probs_text_noint <- capture.output(probs_noint <- logistic_summary(b2, dat=data_full_revised_allmeanings_ie_length, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b2, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b2, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b2, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b2, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  b2 <- brms_fit_indices(b2, moment_match=TRUE);
+  m_noint <- b2;
+  (modcmp_0_noint <- brms_compare_models(b0, m_noint, "[null]", "[noint]", bayes_factor=brms_bayes_factors)); # m_noint is a bit better than null
+  (modcmp_full_noint <- brms_compare_models(m_full, m_noint, "[full]", "[noint]", bayes_factor=brms_bayes_factors)); # full is worse
+
+  # check if Trill is needed at all (because it seems it might not):
+  b3_priors <- c(
+    brms::set_prior("normal(0, 0.5)", class = "b"),
+    brms::set_prior("normal(0, 0.5)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Area")
+  ); # no trill
+  set.seed(314); # for replicability
+  b3 <- brms::brm(cfl2 ~ 1 + rough +
+                    (1 + rough | Language) +
+                    (1 + rough | Family) +
+                    (1 + rough | Area),
+                  data=data_full_revised_allmeanings_ie_length,
+                  prior=b3_priors,
+                  family="poisson",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), seed=413); # adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b3); mcmc_plot(b3, type="trace"); mcmc_plot(b3);
+  (hyps_notrill <- brms::hypothesis(b3, c("roughyes = 0", "roughyes > 0")));
+  (hdi95_notrill <- hdi(b3, ci=0.95));
+  m_notrill <- b3;
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_notrill <- "./figures/formlength_rough_trill_full_notrill";
+  mcmc_plot(b3, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b3); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b3, type="pred", terms=c("rough")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_notrill <- capture.output(summary(b3));
+  probs_text_notrill <- capture.output(probs_notrill <- logistic_summary(b3, dat=data_full_revised_allmeanings_ie_length, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b3, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b3, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b3, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b3, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  # model comparisons
+  m_notrill <- brms_fit_indices(m_notrill, moment_match=TRUE);
+  (modcmp_0_notrill <- brms_compare_models(b0, m_notrill, "[null]", "[notrill]", bayes_factor=brms_bayes_factors)); # notrill is a bit better than null
+  (modcmp_full_notrill <- brms_compare_models(m_full, m_notrill, "[full]", "[notrill]", bayes_factor=brms_bayes_factors)); # similar
+  (modcmp_noint_notrill <- brms_compare_models(m_noint, m_notrill, "[noint]", "[notrill]", bayes_factor=brms_bayes_factors)); # similar
+  # -> so, Trill is not needed apparently...
+
+  
+  # compare with the default  priors (prior sensitivity check):
+  set.seed(314); # for replicability
+  b1f <- brms::brm(cfl2 ~ 1 + rough * Trill +
+                     (1 + rough * Trill | Language) +
+                     (1 + rough * Trill | Family) +
+                     (1 + rough * Trill | Area),
+                   data=data_full_revised_allmeanings_ie_length,
+                   family="poisson",
+                   save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                   sample_prior=TRUE,  # needed for hypotheses tests
+                   cores=brms_ncores, iter=3000, control=list(adapt_delta=0.99), seed=413); # adapt_delta=0.99 needed to deal with divergent transition(s); iter=3000 needed to deal with ESS too low
+  summary(b1f); mcmc_plot(b1f, type="trace"); mcmc_plot(b1f);
+  (hyps_f <- brms::hypothesis(b1f, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0", "roughyes:Trillyes = 0")));
+  (hdi95_f <- hdi(b1f, ci=0.95));
+  pp_check(b1f, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay');
+  g <- arrangeGrob(pp_check(b1f, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1f, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1f, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g);
+  b1f <- brms_fit_indices(b1f, moment_match=TRUE);
+  (modcmp_f <- brms_compare_models(m_full, b1f, "[custom prior]", "[default prior]", bayes_factor=brms_bayes_factors)); # equivalent
+  
+  # save the results:
+  formlength_rough_trill <- list("full"=list("model"=NULL, #m_full, # needed for later comparisons
+                                             "summary"=summary_mod_full, "hypotheses"=hyps_full, "hdi95"=hdi95_full, 
+                                             "cmp_to_null"=modcmp_0_full, "probs"=probs_full, "probs_text"=probs_text_full, "plot_prefix"=plot_prefix_full),
+                                 "noint"=list("model"=NULL, #m_noint, # needed for later comparisons
+                                              "summary"=summary_mod_noint, "hypotheses"=hyps_noint, "hdi95"=hdi95_noint, 
+                                              "cmp_to_null"=modcmp_0_noint,  "cmp_to_full"=modcmp_full_noint, "probs"=probs_noint, "probs_text"=probs_text_noint, "plot_prefix"=plot_prefix_noint),
+                                 "notrill"=list("model"=NULL, #m_notrill, # needed for later comparisons
+                                                "summary"=summary_mod_notrill, "hypotheses"=hyps_notrill, "hdi95"=hdi95_notrill, 
+                                                "cmp_to_null"=modcmp_0_notrill,  "cmp_to_full"=modcmp_full_notrill, "cmp_to_noint"=modcmp_noint_notrill, 
+                                                "probs"=probs_notrill, "probs_text"=probs_text_notrill, "plot_prefix"=plot_prefix_notrill),
+                                 "full_default_priors"=list("hypotheses"=hyps_f, "hdi95"=hdi95_f, "modcmp"=modcmp_f));
+  
+  save(formlength_rough_trill, 
+       formlength_rough_trill_glmer,
+       file=file_name, compress="xz", compression_level=9); # save this model
+  
+} else
+{
+  load(file_name);
+}
+
+## ----results='hide', warning=FALSE, message=FALSE-----------------------------
+file_name <- "./cached/formnormlength_rough_trill.RData";
+if( !file.exists(file_name) )
+{
+  # cache these results:
+  
+  ## CleanFormLength:
+  
+  ## Frequentist ##
+  set.seed(314); # for replicability
+  m_full <- glmer(cfln2 ~ 1 + rough * Trill +
+                    (1 + rough * Trill | Language) +
+                    (1 + rough * Trill | Family) +
+                    (1 + rough * Trill | Area),
+                  data=data_full_revised_allmeanings_ie_length,
+                  family=poisson(), 
+                  control=glmerControl(optCtrl=list(maxfun=2e4), optimizer="bobyqa")); # the full model -> boundary (singular) fit
+  rePCA(m_full); summary(m_full);
+  m1 <- update(m_full, . ~ . - (1 + rough * Trill | Language) + (1 + rough + Trill | Language) - 
+                 (1 + rough * Trill | Family) + (1 + rough + Trill | Family) - 
+                 (1 + rough * Trill | Area) + (1 + rough + Trill | Area) - 
+                 (1 + rough + Trill | Family) + (1 + rough | Family) - 
+                 (1 + rough + Trill | Language) + (1 + rough | Language) - 
+                 (1 + rough | Language) + (1 | Language) - 
+                 (1 + rough + Trill | Area) + (1 + rough | Area) - 
+                 (1 + rough | Family) + (1 | Family) - 
+                 (1 + rough | Area) + (1 | Area) - 
+                 (1 | Area)); rePCA(m1); summary(m1); anova(m1, m_full);
+  m2 <- update(m1, . ~ . - rough:Trill); summary(m2); anova(m2, m1); # the interaction does not matter (p=0.58)
+  m3 <- update(m2, . ~ . - Trill); summary(m3); anova(m3, m1); # Trill does not matter (p=0.78)
+  m0 <- update(m3, . ~ . - rough); summary(m0); # the null model
+  # so, only rough has a positive effect on the length...
+  formnormlength_rough_trill_glmer <- list("model"=m3, "full_model"=m1, 
+                                           "cmp_to_null"=anova(m3, m0), "cmp_to_full"=anova(m3, m1));
+  
+  
+  ## Bayesian ##
+  # check the priors that we can set:
+  get_prior(cfln2 ~ 1 + rough * Trill +
+              (1 + rough * Trill | Language) +
+              (1 + rough * Trill | Family) +
+              (1 + rough * Trill | Area),
+            data=data_full_revised_allmeanings_ie_length,
+            family="poisson");
+  # setting the priors:
+  b1_priors <- c(
+    brms::set_prior("normal(0, 0.5)", class = "b"),
+    brms::set_prior("normal(0, 0.5)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Trillyes", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes:Trillyes", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Trillyes", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes:Trillyes", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Area"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Trillyes", group="Area"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes:Trillyes", group="Area")
+  ); # for the full model
+  # prior predictive checks:
+  set.seed(314); # for replicability
+  b_prior <- brms::brm(cfln2 ~ 1 + rough * Trill +
+                         (1 + rough * Trill | Language) +
+                         (1 + rough * Trill | Family) +
+                         (1 + rough * Trill | Area),
+                       data=data_full_revised_allmeanings_ie_length,
+                       prior=b1_priors,
+                       family="poisson",
+                       sample_prior='only',  # needed for prior predictive checks
+                       cores=brms_ncores, seed=413);
+  # save the results we need later on:
+  plot_prefix <- "./figures/formlnormength_rough_trill_full";
+  g <- arrangeGrob(pp_check(b_prior, type='stat', sta ='min') + xlab('form length') + ggtitle('Prior predictive distribution of minimum values'),
+                   pp_check(b_prior, type='stat', stat='mean') + xlab('form length') + ggtitle('Prior predictive distribution of means'),
+                   pp_check(b_prior, type='stat', stat='max') + xlab('form length') + ggtitle('Prior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min, even if the mean is a bit off but not much)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_prior_predictive_checks.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  # fit the logistic model:
+  set.seed(314); # for replicability
+  b1 <- brms::brm(cfln2 ~ 1 + rough * Trill +
+                    (1 + rough * Trill | Language) +
+                    (1 + rough * Trill | Family) +
+                    (1 + rough * Trill | Area),
+                  data=data_full_revised_allmeanings_ie_length,
+                  prior=b1_priors,
+                  family="poisson",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, iter=3000, control=list(adapt_delta=0.99), seed=413); # adapt_delta=0.99 needed to deal with divergent transition(s); iter=3000 needed to deal with ESS too low
+  summary(b1); mcmc_plot(b1, type="trace"); mcmc_plot(b1);
+  (hyps_full <- brms::hypothesis(b1, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0", "roughyes:Trillyes = 0")));
+  (hdi95_full <- hdi(b1, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_full <- "./figures/formnormlength_rough_trill_full";
+  mcmc_plot(b1, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b1, variable="^b_", regex=TRUE); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b1, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_full <- capture.output(summary(b1));
+  probs_text_full <- capture.output(probs_full <- logistic_summary(b1, dat=data_full_revised_allmeanings_ie_length, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b1, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b1, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  b1 <- brms_fit_indices(b1, moment_match=TRUE, reloo=TRUE);
+  m_full <- b1;
+
+  # model comparison with the null model:
+  b0_priors <- c(
+    brms::set_prior("normal(0, 0.5)", class = "Intercept"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Area")
+  ); # for the null model
+  b0 <- brms::brm(cfln2 ~ 1 +
+                    (1 | Language) +
+                    (1 | Family) +
+                    (1 | Area),
+                  data=data_full_revised_allmeanings_ie_length,
+                  prior=b0_priors,
+                  family="poisson",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), seed=413); # adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b0); 
+  mcmc_plot(b0, type="trace"); 
+  mcmc_plot(b0);
+  b0 <- brms_fit_indices(b0, moment_match=TRUE, reloo=TRUE);
+  (modcmp_0_full <- brms_compare_models(b0, m_full, "[null]", "[full]", bayes_factor=brms_bayes_factors)); # quite similar, with a hint that full might be better (KFOLD)
+  
+  # let's see if the interaction matters:
+  b2_priors <- c(
+    brms::set_prior("normal(0, 0.5)", class = "b"),
+    brms::set_prior("normal(0, 0.5)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Trillyes", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Trillyes", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Area"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Trillyes", group="Area")
+  ); # no interaction
+  set.seed(314); # for replicability
+  b2 <- brms::brm(cfln2 ~ 1 + rough + Trill +
+                    (1 + rough + Trill | Language) +
+                    (1 + rough + Trill | Family) +
+                    (1 + rough + Trill | Area),
+                  data=data_full_revised_allmeanings_ie_length,
+                  prior=b2_priors,
+                  family="poisson",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, iter=3000, control=list(adapt_delta=0.99), seed=413); # adapt_delta=0.99 needed to deal with divergent transition(s); iter=3000 needed to deal with ESS too low
+  summary(b2); mcmc_plot(b2, type="trace"); mcmc_plot(b2);
+  (hyps_noint <- brms::hypothesis(b2, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0")));
+  (hdi95_noint <- hdi(b2, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_noint <- "./figures/formnormlength_rough_trill_full_noint";
+  mcmc_plot(b2, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b2); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b2, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_noint <- capture.output(summary(b2));
+  probs_text_noint <- capture.output(probs_noint <- logistic_summary(b2, dat=data_full_revised_allmeanings_ie_length, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b2, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b2, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b2, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b2, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  b2 <- brms_fit_indices(b2, moment_match=TRUE, reloo=TRUE);
+  m_noint <- b2;
+  (modcmp_0_noint <- brms_compare_models(b0, m_noint, "[null]", "[noint]", bayes_factor=brms_bayes_factors)); # m_noint is a bit better than null
+  (modcmp_full_noint <- brms_compare_models(m_full, m_noint, "[full]", "[noint]", bayes_factor=brms_bayes_factors)); # full is worse
+
+  # check if Trill is needed at all (because it seems it might not):
+  b3_priors <- c(
+    brms::set_prior("normal(0, 0.5)", class = "b"),
+    brms::set_prior("normal(0, 0.5)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Area")
+  ); # no trill
+  set.seed(314); # for replicability
+  b3 <- brms::brm(cfln2 ~ 1 + rough +
+                    (1 + rough | Language) +
+                    (1 + rough | Family) +
+                    (1 + rough | Area),
+                  data=data_full_revised_allmeanings_ie_length,
+                  prior=b3_priors,
+                  family="poisson",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), seed=413); # adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b3); mcmc_plot(b3, type="trace"); mcmc_plot(b3);
+  (hyps_notrill <- brms::hypothesis(b3, c("roughyes = 0", "roughyes > 0")));
+  (hdi95_notrill <- hdi(b3, ci=0.95));
+  m_notrill <- b3;
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_notrill <- "./figures/formnormlength_rough_trill_full_notrill";
+  mcmc_plot(b3, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b3); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b3, type="pred", terms=c("rough")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_notrill <- capture.output(summary(b3));
+  probs_text_notrill <- capture.output(probs_notrill <- logistic_summary(b3, dat=data_full_revised_allmeanings_ie_length, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b3, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b3, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b3, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b3, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  # model comparisons
+  m_notrill <- brms_fit_indices(m_notrill, moment_match=TRUE, reloo=TRUE);
+  (modcmp_0_notrill <- brms_compare_models(b0, m_notrill, "[null]", "[notrill]", bayes_factor=brms_bayes_factors)); # notrill is a bit better than null
+  (modcmp_full_notrill <- brms_compare_models(m_full, m_notrill, "[full]", "[notrill]", bayes_factor=brms_bayes_factors)); # notrill is a bit better than full
+  (modcmp_noint_notrill <- brms_compare_models(m_noint, m_notrill, "[noint]", "[notrill]", bayes_factor=brms_bayes_factors)); # similar
+  # -> so, Trill is not needed apparently...
+
+  
+  # compare with the default  priors (prior sensitivity check):
+  set.seed(314); # for replicability
+  b1f <- brms::brm(cfln2 ~ 1 + rough * Trill +
+                     (1 + rough * Trill | Language) +
+                     (1 + rough * Trill | Family) +
+                     (1 + rough * Trill | Area),
+                   data=data_full_revised_allmeanings_ie_length,
+                   family="poisson",
+                   save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                   sample_prior=TRUE,  # needed for hypotheses tests
+                   cores=brms_ncores, iter=4000, control=list(adapt_delta=0.99), seed=413); # adapt_delta=0.99 needed to deal with divergent transition(s); iter=4000 needed to deal with ESS too low
+  summary(b1f); mcmc_plot(b1f, type="trace"); mcmc_plot(b1f);
+  (hyps_f <- brms::hypothesis(b1f, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0", "roughyes:Trillyes = 0")));
+  (hdi95_f <- hdi(b1f, ci=0.95));
+  pp_check(b1f, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay');
+  g <- arrangeGrob(pp_check(b1f, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1f, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1f, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g);
+  b1f <- brms_fit_indices(b1f, moment_match=TRUE);
+  (modcmp_f <- brms_compare_models(m_full, b1f, "[custom prior]", "[default prior]", bayes_factor=brms_bayes_factors)); # pretty much equivalent
+  
+  # save the results:
+  formnormlength_rough_trill <- list("full"=list("model"=NULL, #m_full, # needed for later comparisons
+                                                 "summary"=summary_mod_full, "hypotheses"=hyps_full, "hdi95"=hdi95_full, 
+                                                 "cmp_to_null"=modcmp_0_full, "probs"=probs_full, "probs_text"=probs_text_full, "plot_prefix"=plot_prefix_full),
+                                     "noint"=list("model"=NULL, #m_noint, # needed for later comparisons
+                                                  "summary"=summary_mod_noint, "hypotheses"=hyps_noint, "hdi95"=hdi95_noint, 
+                                                  "cmp_to_null"=modcmp_0_noint,  "cmp_to_full"=modcmp_full_noint, "probs"=probs_noint, "probs_text"=probs_text_noint, "plot_prefix"=plot_prefix_noint),
+                                     "notrill"=list("model"=NULL, #m_notrill, # needed for later comparisons
+                                                    "summary"=summary_mod_notrill, "hypotheses"=hyps_notrill, "hdi95"=hdi95_notrill, 
+                                                    "cmp_to_null"=modcmp_0_notrill,  "cmp_to_full"=modcmp_full_notrill, "cmp_to_noint"=modcmp_noint_notrill, 
+                                                    "probs"=probs_notrill, "probs_text"=probs_text_notrill, "plot_prefix"=plot_prefix_notrill),
+                                     "full_default_priors"=list("hypotheses"=hyps_f, "hdi95"=hdi95_f, "modcmp"=modcmp_f));
+  
+  save(formnormlength_rough_trill, 
+       formnormlength_rough_trill_glmer,
+       file=file_name, compress="xz", compression_level=9); # save this model
+  
+} else
+{
+  load(file_name);
+}
+
+## -----------------------------------------------------------------------------
+cat(formlength_rough_trill$full$summary, sep="\n");
+
+## ----results='markup'---------------------------------------------------------
+formlength_rough_trill$full$hypotheses;
+
+## -----------------------------------------------------------------------------
+cat("Custom priors:\n"); formlength_rough_trill$full$hdi95;
+cat("\n\nDefault priors:\n"); formlength_rough_trill$full_default_priors$hdi95;
+
+## ----results='markup'---------------------------------------------------------
+formlength_rough_trill$noint$hypotheses;
+
+## ----results='markup'---------------------------------------------------------
+formlength_rough_trill$notrill$hypotheses;
+
+## -----------------------------------------------------------------------------
+summary(formlength_rough_trill_glmer$model);
+
+## -----------------------------------------------------------------------------
+formlength_rough_trill_glmer$cmp_to_null
+
+## -----------------------------------------------------------------------------
+formlength_rough_trill_glmer$cmp_to_full
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(formlength_rough_trill$notrill$summary,sep="\n"));
+formlength_rough_trill$notrill$hypotheses;
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(formnormlength_rough_trill$notrill$summary,sep="\n"));
+formnormlength_rough_trill$notrill$hypotheses;
+
+## ----fig.width=3*5, fig.height=5, fig.cap=capFig("Distribution of clear form (top) and the normalised clean form (bottom) length overall (left), by 'rough' (center) and by 'trill' (right) for the strict 'rough' and 'smooth' meanings only.")----
+grid.arrange(ggplot(data_full_revised_ie_length, aes(CleanFormLength)) + 
+               geom_histogram(binwidth=1, color="black", fill="gray80") + 
+               NULL,
+             ggplot(data_full_revised_ie_length, aes(CleanFormLength)) + 
+               geom_histogram(binwidth=1, aes(fill=rough), alpha=0.5, color="black") + 
+               NULL,
+             ggplot(data_full_revised_ie_length, aes(CleanFormLength)) + 
+               geom_histogram(binwidth=1, aes(fill=Trill), alpha=0.5, color="black") + 
+               NULL,
+             
+             ggplot(data_full_revised_ie_length, aes(CleanFormNormLength)) + 
+               geom_histogram(binwidth=1, color="black", fill="gray80") + 
+               NULL,
+             ggplot(data_full_revised_ie_length, aes(CleanFormNormLength)) + 
+               geom_histogram(binwidth=1, aes(fill=rough), alpha=0.5, color="black") + 
+               NULL,
+             ggplot(data_full_revised_ie_length, aes(CleanFormNormLength)) + 
+               geom_histogram(binwidth=1, aes(fill=Trill), alpha=0.5, color="black") + 
+               NULL,
+             
+             ncol=3);
+
+## ----results='hide', warning=FALSE, message=FALSE-----------------------------
+file_name <- "./cached/formlength_rough_trill_strict.RData";
+if( !file.exists(file_name) )
+{
+  # cache these results:
+  
+  ## Frequentist ##
+  set.seed(314); # for replicability
+  try(m_full <- glmer(cfl2 ~ 1 + rough * Trill +
+                   (1 + rough * Trill | Language) +
+                   (1 + rough * Trill | Family) +
+                   (1 + rough * Trill | Area),
+                 data=data_full_revised_ie_length,
+                 family=poisson(),
+                 control=glmerControl(optCtrl=list(maxfun=2e4), optimizer="bobyqa"))); # Error: number of observations (=590) < number of random effects (=1164) for term (1 + rough * Trill | Language); the random-effects parameters are probably unidentifiable
+  try(m_full <- glmer(cfl2 ~ 1 + rough * Trill +
+                   (1 + rough + Trill | Language) +
+                   (1 + rough * Trill | Family) +
+                   (1 + rough * Trill | Area),
+                 data=data_full_revised_ie_length,
+                 family=poisson(),
+                 control=glmerControl(optCtrl=list(maxfun=2e4), optimizer="bobyqa"))); # Error: number of observations (=590) < number of random effects (=873) for term (1 + rough + Trill | Language); the random-effects parameters are probably unidentifiable
+  m_full <- glmer(cfl2 ~ 1 + rough * Trill +
+                    (1 + rough | Language) +
+                    (1 + rough * Trill | Family) +
+                    (1 + rough * Trill | Area),
+                  data=data_full_revised_ie_length,
+                  family=poisson(), 
+                  control=glmerControl(optCtrl=list(maxfun=2e4), optimizer="bobyqa")); # boundary (singular) fit: see help('isSingular')
+  rePCA(m_full); summary(m_full);
+  m1 <- update(m_full, . ~ . - (1 + rough * Trill | Area) + (1 + rough + Trill | Area) - 
+                 (1 + rough * Trill | Family) + (1 + rough + Trill | Family) - 
+                 (1 + rough + Trill | Area) + (1 + rough | Area) - 
+                 (1 + rough + Trill | Family) + (1 + rough | Family) - 
+                 (1 + rough | Area) + (1 | Area) - 
+                 (1 + rough | Family) + (1 | Family) - 
+                 (1 + rough | Language) + (1 | Language) - 
+                 (1 | Area)); rePCA(m1); summary(m1); anova(m1, m_full);
+  m2 <- update(m1, . ~ . - rough:Trill); summary(m2); anova(m2, m1); # the interaction does not matter (p=0.99)
+  m3 <- update(m2, . ~ . - Trill); summary(m3); anova(m3, m1); # Trill does not matter (p=0.92)
+  m0 <- update(m3, . ~ . - rough); summary(m0); # the null model
+  # so, only rough has a positive effect on the length...
+  formlength_rough_trill_strict_glmer <- list("model"=m3, "full_model"=m1, 
+                                              "cmp_to_null"=anova(m3, m0), "cmp_to_full"=anova(m3, m1));
+  
+  
+  ## Bayesian ##
+  # check the priors that we can set:
+  get_prior(cfl2 ~ 1 + rough * Trill +
+              (1 + rough * Trill | Language) +
+              (1 + rough * Trill | Family) +
+              (1 + rough * Trill | Area),
+            data=data_full_revised_ie_length,
+            family="poisson");
+  # setting the priors:
+  b1_priors <- c(
+    brms::set_prior("normal(0, 0.5)", class = "b"),
+    brms::set_prior("normal(0, 0.5)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Trillyes", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes:Trillyes", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Trillyes", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes:Trillyes", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Area"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Trillyes", group="Area"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes:Trillyes", group="Area")
+  ); # for the full model
+  # prior predictive checks:
+  set.seed(314); # for replicability
+  b_prior <- brms::brm(cfl2 ~ 1 + rough * Trill +
+                         (1 + rough * Trill | Language) +
+                         (1 + rough * Trill | Family) +
+                         (1 + rough * Trill | Area),
+                       data=data_full_revised_ie_length,
+                       prior=b1_priors,
+                       family="poisson",
+                       sample_prior='only',  # needed for prior predictive checks
+                       cores=brms_ncores, seed=314);
+  # save the results we need later on:
+  plot_prefix <- "./figures/formlength_rough_trill_strict";
+  g <- arrangeGrob(pp_check(b_prior, type='stat', sta ='min') + xlab('form length') + ggtitle('Prior predictive distribution of minimum values'),
+                   pp_check(b_prior, type='stat', stat='mean') + xlab('form length') + ggtitle('Prior predictive distribution of means'),
+                   pp_check(b_prior, type='stat', stat='max') + xlab('form length') + ggtitle('Prior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min, even if the mean is a bit off but not much)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_prior_predictive_checks.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  # fit the logistic model:
+  set.seed(314); # for replicability
+  b1 <- brms::brm(cfl2 ~ 1 + rough * Trill +
+                    (1 + rough * Trill | Language) +
+                    (1 + rough * Trill | Family) +
+                    (1 + rough * Trill | Area),
+                  data=data_full_revised_ie_length,
+                  prior=b1_priors,
+                  family="poisson",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b1); mcmc_plot(b1, type="trace"); mcmc_plot(b1);
+  (hyps_full <- brms::hypothesis(b1, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0", "roughyes:Trillyes = 0")));
+  (hdi95_full <- hdi(b1, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_full <- "./figures/formlength_rough_trill_strict";
+  mcmc_plot(b1, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b1, variable="^b_", regex=TRUE); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b1, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_full <- capture.output(summary(b1));
+  probs_text_full <- capture.output(probs_full <- logistic_summary(b1, dat=data_full_revised_ie_length, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b1, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b1, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  b1 <- brms_fit_indices(b1, moment_match=TRUE);
+  m_full <- b1;
+
+  # model comparison with the null model:
+  b0_priors <- c(
+    brms::set_prior("normal(0, 0.5)", class = "Intercept"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Area")
+  ); # for the null model
+  b0 <- brms::brm(cfl2 ~ 1 +
+                    (1 | Language) +
+                    (1 | Family) +
+                    (1 | Area),
+                  data=data_full_revised_ie_length,
+                  prior=b0_priors,
+                  family="poisson",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), seed=413); # adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b0); 
+  mcmc_plot(b0, type="trace"); 
+  mcmc_plot(b0);
+  b0 <- brms_fit_indices(b0, moment_match=TRUE);
+  (modcmp_0_full <- brms_compare_models(b0, m_full, "[null]", "[full]", bayes_factor=brms_bayes_factors)); # full is better than null
+  
+  # let's see if the interaction matters:
+  b2_priors <- c(
+    brms::set_prior("normal(0, 0.5)", class = "b"),
+    brms::set_prior("normal(0, 0.5)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Trillyes", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Trillyes", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Area"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Trillyes", group="Area")
+  ); # no interaction
+  set.seed(314); # for replicability
+  b2 <- brms::brm(cfl2 ~ 1 + rough + Trill +
+                    (1 + rough + Trill | Language) +
+                    (1 + rough + Trill | Family) +
+                    (1 + rough + Trill | Area),
+                  data=data_full_revised_ie_length,
+                  prior=b2_priors,
+                  family="poisson",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b2); mcmc_plot(b2, type="trace"); mcmc_plot(b2);
+  (hyps_noint <- brms::hypothesis(b2, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0")));
+  (hdi95_noint <- hdi(b2, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_noint <- "./figures/formlength_rough_trill_strict_noint";
+  mcmc_plot(b2, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b2); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b2, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_noint <- capture.output(summary(b2));
+  probs_text_noint <- capture.output(probs_noint <- logistic_summary(b2, dat=data_full_revised_ie_length, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b2, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b2, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b2, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b2, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  b2 <- brms_fit_indices(b2, moment_match=TRUE);
+  m_noint <- b2;
+  (modcmp_0_noint <- brms_compare_models(b0, m_noint, "[null]", "[noint]", bayes_factor=brms_bayes_factors)); # noint is better than null
+  (modcmp_full_noint <- brms_compare_models(m_full, m_noint, "[full]", "[noint]", bayes_factor=brms_bayes_factors)); # equivalent
+  # -> so, the interaction is not needed apparently...
+
+  # check if Trill is needed at all (because it seems it might not):
+  b3_priors <- c(
+    brms::set_prior("normal(0, 0.5)", class = "b"),
+    brms::set_prior("normal(0, 0.5)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Area")
+  ); # no trill
+  set.seed(314); # for replicability
+  b3 <- brms::brm(cfl2 ~ 1 + rough +
+                    (1 + rough | Language) +
+                    (1 + rough | Family) +
+                    (1 + rough | Area),
+                  data=data_full_revised_ie_length,
+                  prior=b3_priors,
+                  family="poisson",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b3); mcmc_plot(b3, type="trace"); mcmc_plot(b3);
+  (hyps_notrill <- brms::hypothesis(b3, c("roughyes = 0", "roughyes > 0")));
+  (hdi95_notrill <- hdi(b3, ci=0.95));
+  m_notrill <- b3;
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_notrill <- "./figures/formlength_rough_trill_strict_notrill";
+  mcmc_plot(b3, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b3); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b3, type="pred", terms=c("rough")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_notrill <- capture.output(summary(b3));
+  probs_text_notrill <- capture.output(probs_notrill <- logistic_summary(b3, dat=data_full_revised_ie_length, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b3, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b3, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b3, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b3, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  # model comparisons
+  m_notrill <- brms_fit_indices(m_notrill, moment_match=TRUE);
+  (modcmp_0_notrill <- brms_compare_models(b0, m_notrill, "[null]", "[notrill]", bayes_factor=brms_bayes_factors)); # notrill is better than null
+  (modcmp_full_notrill <- brms_compare_models(m_full, m_notrill, "[full]", "[notrill]", bayes_factor=brms_bayes_factors)); # equivalent
+  (modcmp_noint_notrill <- brms_compare_models(m_noint, m_notrill, "[noint]", "[notrill]", bayes_factor=brms_bayes_factors)); # equivalent
+  # -> so, Trill is not needed apparently...
+
+  
+  # compare with the default  priors (prior sensitivity check):
+  set.seed(314); # for replicability
+  b1f <- brms::brm(cfl2 ~ 1 + rough * Trill +
+                     (1 + rough * Trill | Language) +
+                     (1 + rough * Trill | Family) +
+                     (1 + rough * Trill | Area),
+                   data=data_full_revised_ie_length,
+                   family="poisson",
+                   save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                   sample_prior=TRUE,  # needed for hypotheses tests
+                   cores=brms_ncores, seed=314);
+  summary(b1f); mcmc_plot(b1f, type="trace"); mcmc_plot(b1f);
+  (hyps_f <- brms::hypothesis(b1f, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0", "roughyes:Trillyes = 0")));
+  (hdi95_f <- hdi(b1f, ci=0.95));
+  pp_check(b1f, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay');
+  g <- arrangeGrob(pp_check(b1f, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1f, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1f, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g);
+  b1f <- brms_fit_indices(b1f, moment_match=TRUE);
+  (modcmp_f <- brms_compare_models(m_full, b1f, "[custom prior]", "[default prior]", bayes_factor=brms_bayes_factors)); # comparable...
+  
+  # save the results:
+  formlength_rough_trill_strict <- list("full"=list("model"=NULL, #m_full, # needed for later comparisons
+                                             "summary"=summary_mod_full, "hypotheses"=hyps_full, "hdi95"=hdi95_full, 
+                                             "cmp_to_null"=modcmp_0_full, "probs"=probs_full, "probs_text"=probs_text_full, "plot_prefix"=plot_prefix_full),
+                                 "noint"=list("model"=NULL, #m_noint, # needed for later comparisons
+                                              "summary"=summary_mod_noint, "hypotheses"=hyps_noint, "hdi95"=hdi95_noint, 
+                                              "cmp_to_null"=modcmp_0_full,  "cmp_to_full"=modcmp_full_noint, "probs"=probs_noint, "probs_text"=probs_text_noint, "plot_prefix"=plot_prefix_noint),
+                                 "notrill"=list("model"=NULL, #m_notrill, # needed for later comparisons
+                                                "summary"=summary_mod_notrill, "hypotheses"=hyps_notrill, "hdi95"=hdi95_notrill, 
+                                                "cmp_to_null"=modcmp_0_notrill,  "cmp_to_full"=modcmp_full_notrill, "cmp_to_noint"=modcmp_noint_notrill, 
+                                                "probs"=probs_notrill, "probs_text"=probs_text_notrill, "plot_prefix"=plot_prefix_notrill),
+                                 "full_default_priors"=list("hypotheses"=hyps_f, "hdi95"=hdi95_f, "modcmp"=modcmp_f));
+  
+  save(formlength_rough_trill_strict, 
+       formlength_rough_trill_strict_glmer,
+       file=file_name, compress="xz", compression_level=9); # save this model
+  } else
+{
+  load(file_name);
+}
+
+## ----results='hide', warning=FALSE, message=FALSE-----------------------------
+file_name <- "./cached/formnormlength_rough_trill_strict.RData";
+if( !file.exists(file_name) )
+{
+  # cache these results:
+  
+  ## Frequentist ##
+  set.seed(314); # for replicability
+  try(m_full <- glmer(cfln2 ~ 1 + rough * Trill +
+                   (1 + rough * Trill | Language) +
+                   (1 + rough * Trill | Family) +
+                   (1 + rough * Trill | Area),
+                 data=data_full_revised_ie_length,
+                 family=poisson(),
+                 control=glmerControl(optCtrl=list(maxfun=2e4), optimizer="bobyqa"))); # Error: number of observations (=590) < number of random effects (=1164) for term (1 + rough * Trill | Language); the random-effects parameters are probably unidentifiable
+  try(m_full <- glmer(cfln2 ~ 1 + rough * Trill +
+                   (1 + rough + Trill | Language) +
+                   (1 + rough * Trill | Family) +
+                   (1 + rough * Trill | Area),
+                 data=data_full_revised_ie_length,
+                 family=poisson(),
+                 control=glmerControl(optCtrl=list(maxfun=2e4), optimizer="bobyqa"))); # Error: number of observations (=590) < number of random effects (=873) for term (1 + rough + Trill | Language); the random-effects parameters are probably unidentifiable
+  m_full <- glmer(cfln2 ~ 1 + rough * Trill +
+                    (1 + rough | Language) +
+                    (1 + rough * Trill | Family) +
+                    (1 + rough * Trill | Area),
+                  data=data_full_revised_ie_length,
+                  family=poisson(), 
+                  control=glmerControl(optCtrl=list(maxfun=2e4), optimizer="bobyqa")); # boundary (singular) fit: see help('isSingular')
+  rePCA(m_full); summary(m_full);
+  m1 <- update(m_full, . ~ . - (1 + rough * Trill | Area) + (1 + rough + Trill | Area) - 
+                 (1 + rough * Trill | Family) + (1 + rough + Trill | Family) - 
+                 (1 + rough + Trill | Area) + (1 + rough | Area) - 
+                 (1 + rough + Trill | Family) + (1 + rough | Family) - 
+                 (1 + rough | Area) + (1 | Area) - 
+                 (1 + rough | Family) + (1 | Family) - 
+                 (1 + rough | Language) + (1 | Language) - 
+                 (1 | Area)); rePCA(m1); summary(m1); anova(m1, m_full);
+  m2 <- update(m1, . ~ . - rough:Trill); summary(m2); anova(m2, m1); # the interaction does not matter (p=0.98)
+  m3 <- update(m2, . ~ . - Trill); summary(m3); anova(m3, m1); # Trill does not matter (p=0.98)
+  m0 <- update(m3, . ~ . - rough); summary(m0); # the null model
+  # so, only rough has a positive effect on the length...
+  formnormlength_rough_trill_strict_glmer <- list("model"=m3, "full_model"=m1, 
+                                                  "cmp_to_null"=anova(m3, m0), "cmp_to_full"=anova(m3, m1));
+  
+  
+  ## Bayesian ##
+  # check the priors that we can set:
+  get_prior(cfln2 ~ 1 + rough * Trill +
+              (1 + rough * Trill | Language) +
+              (1 + rough * Trill | Family) +
+              (1 + rough * Trill | Area),
+            data=data_full_revised_ie_length,
+            family="poisson");
+  # setting the priors:
+  b1_priors <- c(
+    brms::set_prior("normal(0, 0.5)", class = "b"),
+    brms::set_prior("normal(0, 0.5)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Trillyes", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes:Trillyes", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Trillyes", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes:Trillyes", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Area"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Trillyes", group="Area"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes:Trillyes", group="Area")
+  ); # for the full model
+  # prior predictive checks:
+  set.seed(314); # for replicability
+  b_prior <- brms::brm(cfln2 ~ 1 + rough * Trill +
+                         (1 + rough * Trill | Language) +
+                         (1 + rough * Trill | Family) +
+                         (1 + rough * Trill | Area),
+                       data=data_full_revised_ie_length,
+                       prior=b1_priors,
+                       family="poisson",
+                       sample_prior='only',  # needed for prior predictive checks
+                       cores=brms_ncores, seed=314);
+  # save the results we need later on:
+  plot_prefix <- "./figures/formnormlength_rough_trill_strict";
+  g <- arrangeGrob(pp_check(b_prior, type='stat', sta ='min') + xlab('form length') + ggtitle('Prior predictive distribution of minimum values'),
+                   pp_check(b_prior, type='stat', stat='mean') + xlab('form length') + ggtitle('Prior predictive distribution of means'),
+                   pp_check(b_prior, type='stat', stat='max') + xlab('form length') + ggtitle('Prior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min, even if the mean is a bit off but not much)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_prior_predictive_checks.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  
+  # fit the logistic model:
+  set.seed(314); # for replicability
+  b1 <- brms::brm(cfln2 ~ 1 + rough * Trill +
+                    (1 + rough * Trill | Language) +
+                    (1 + rough * Trill | Family) +
+                    (1 + rough * Trill | Area),
+                  data=data_full_revised_ie_length,
+                  prior=b1_priors,
+                  family="poisson",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b1); mcmc_plot(b1, type="trace"); mcmc_plot(b1);
+  (hyps_full <- brms::hypothesis(b1, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0", "roughyes:Trillyes = 0")));
+  (hdi95_full <- hdi(b1, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_full <- "./figures/formnormlength_rough_trill_strict";
+  mcmc_plot(b1, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b1, variable="^b_", regex=TRUE); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b1, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_full <- capture.output(summary(b1));
+  probs_text_full <- capture.output(probs_full <- logistic_summary(b1, dat=data_full_revised_ie_length, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b1, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b1, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  b1 <- brms_fit_indices(b1, moment_match=TRUE, reloo=TRUE);
+  m_full <- b1;
+
+  # model comparison with the null model:
+  b0_priors <- c(
+    brms::set_prior("normal(0, 0.5)", class = "Intercept"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Area")
+  ); # for the null model
+  b0 <- brms::brm(cfln2 ~ 1 +
+                    (1 | Language) +
+                    (1 | Family) +
+                    (1 | Area),
+                  data=data_full_revised_ie_length,
+                  prior=b0_priors,
+                  family="poisson",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), seed=413); # adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b0); 
+  mcmc_plot(b0, type="trace"); 
+  mcmc_plot(b0);
+  b0 <- brms_fit_indices(b0, moment_match=TRUE, reloo=TRUE);
+  (modcmp_0_full <- brms_compare_models(b0, m_full, "[null]", "[full]", bayes_factor=brms_bayes_factors)); # full is better than null
+  
+  # let's see if the interaction matters:
+  b2_priors <- c(
+    brms::set_prior("normal(0, 0.5)", class = "b"),
+    brms::set_prior("normal(0, 0.5)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Trillyes", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Trillyes", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Area"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Trillyes", group="Area")
+  ); # no interaction
+  set.seed(314); # for replicability
+  b2 <- brms::brm(cfln2 ~ 1 + rough + Trill +
+                    (1 + rough + Trill | Language) +
+                    (1 + rough + Trill | Family) +
+                    (1 + rough + Trill | Area),
+                  data=data_full_revised_ie_length,
+                  prior=b2_priors,
+                  family="poisson",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), seed=413); # adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b2); mcmc_plot(b2, type="trace"); mcmc_plot(b2);
+  (hyps_noint <- brms::hypothesis(b2, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0")));
+  (hdi95_noint <- hdi(b2, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_noint <- "./figures/formnormlength_rough_trill_strict_noint";
+  mcmc_plot(b2, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b2); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b2, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_noint <- capture.output(summary(b2));
+  probs_text_noint <- capture.output(probs_noint <- logistic_summary(b2, dat=data_full_revised_ie_length, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b2, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b2, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b2, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b2, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  b2 <- brms_fit_indices(b2, moment_match=TRUE, reloo=TRUE);
+  m_noint <- b2;
+  (modcmp_0_noint <- brms_compare_models(b0, m_noint, "[null]", "[noint]", bayes_factor=brms_bayes_factors)); # noint is better than null
+  (modcmp_full_noint <- brms_compare_models(m_full, m_noint, "[full]", "[noint]", bayes_factor=brms_bayes_factors)); # equivalent, with a hint that noint is better
+  # -> so, the interaction is not needed apparently...
+
+  # check if Trill is needed at all (because it seems it might not):
+  b3_priors <- c(
+    brms::set_prior("normal(0, 0.5)", class = "b"),
+    brms::set_prior("normal(0, 0.5)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Language"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Family"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "Intercept", group="Area"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", coef = "roughyes", group="Area")
+  ); # no trill
+  set.seed(314); # for replicability
+  b3 <- brms::brm(cfln2 ~ 1 + rough +
+                    (1 + rough | Language) +
+                    (1 + rough | Family) +
+                    (1 + rough | Area),
+                  data=data_full_revised_ie_length,
+                  prior=b3_priors,
+                  family="poisson",
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), seed=413); # adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b3); mcmc_plot(b3, type="trace"); mcmc_plot(b3);
+  (hyps_notrill <- brms::hypothesis(b3, c("roughyes = 0", "roughyes > 0")));
+  (hdi95_notrill <- hdi(b3, ci=0.95));
+  m_notrill <- b3;
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_notrill <- "./figures/formnormlength_rough_trill_strict_notrill";
+  mcmc_plot(b3, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b3); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b3, type="pred", terms=c("rough")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_notrill <- capture.output(summary(b3));
+  probs_text_notrill <- capture.output(probs_notrill <- logistic_summary(b3, dat=data_full_revised_ie_length, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b3, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b3, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b3, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b3, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  # model comparisons
+  m_notrill <- brms_fit_indices(m_notrill, moment_match=TRUE, reloo=TRUE);
+  (modcmp_0_notrill <- brms_compare_models(b0, m_notrill, "[null]", "[notrill]", bayes_factor=brms_bayes_factors)); # notrill is better than null
+  (modcmp_full_notrill <- brms_compare_models(m_full, m_notrill, "[full]", "[notrill]", bayes_factor=brms_bayes_factors)); # equivalent, wtith a hint full might be worse
+  (modcmp_noint_notrill <- brms_compare_models(m_noint, m_notrill, "[noint]", "[notrill]", bayes_factor=brms_bayes_factors)); # equivalent
+  # -> so, Trill is not needed apparently...
+
+  
+  # compare with the default  priors (prior sensitivity check):
+  set.seed(314); # for replicability
+  b1f <- brms::brm(cfln2 ~ 1 + rough * Trill +
+                     (1 + rough * Trill | Language) +
+                     (1 + rough * Trill | Family) +
+                     (1 + rough * Trill | Area),
+                   data=data_full_revised_ie_length,
+                   family="poisson",
+                   save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                   sample_prior=TRUE,  # needed for hypotheses tests
+                   cores=brms_ncores, seed=314);
+  summary(b1f); mcmc_plot(b1f, type="trace"); mcmc_plot(b1f);
+  (hyps_f <- brms::hypothesis(b1f, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0", "roughyes:Trillyes = 0")));
+  (hdi95_f <- hdi(b1f, ci=0.95));
+  pp_check(b1f, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay');
+  g <- arrangeGrob(pp_check(b1f, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1f, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1f, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g);
+  b1f <- brms_fit_indices(b1f, moment_match=TRUE, reloo=TRUE);
+  (modcmp_f <- brms_compare_models(m_full, b1f, "[custom prior]", "[default prior]", bayes_factor=brms_bayes_factors)); # comparable...
+  
+  # save the results:
+  formnormlength_rough_trill_strict <- list("full"=list("model"=NULL, #m_full, # needed for later comparisons
+                                                        "summary"=summary_mod_full, "hypotheses"=hyps_full, "hdi95"=hdi95_full, 
+                                                        "cmp_to_null"=modcmp_0_full, "probs"=probs_full, "probs_text"=probs_text_full, "plot_prefix"=plot_prefix_full),
+                                            "noint"=list("model"=NULL, #m_noint, # needed for later comparisons
+                                                         "summary"=summary_mod_noint, "hypotheses"=hyps_noint, "hdi95"=hdi95_noint, 
+                                                         "cmp_to_null"=modcmp_0_full,  "cmp_to_full"=modcmp_full_noint, "probs"=probs_noint, "probs_text"=probs_text_noint, "plot_prefix"=plot_prefix_noint),
+                                            "notrill"=list("model"=NULL, #m_notrill, # needed for later comparisons
+                                                           "summary"=summary_mod_notrill, "hypotheses"=hyps_notrill, "hdi95"=hdi95_notrill, 
+                                                           "cmp_to_null"=modcmp_0_notrill,  "cmp_to_full"=modcmp_full_notrill, "cmp_to_noint"=modcmp_noint_notrill, 
+                                                           "probs"=probs_notrill, "probs_text"=probs_text_notrill, "plot_prefix"=plot_prefix_notrill),
+                                            "full_default_priors"=list("hypotheses"=hyps_f, "hdi95"=hdi95_f, "modcmp"=modcmp_f));
+  
+  save(formnormlength_rough_trill_strict, 
+       formnormlength_rough_trill_strict_glmer,
+       file=file_name, compress="xz", compression_level=9); # save this model
+  } else
+{
+  load(file_name);
+}
+
+## ----results='markup'---------------------------------------------------------
+cat(formlength_rough_trill_strict$notrill$summary,sep="\n");
+
+## ----results='markup'---------------------------------------------------------
+formlength_rough_trill_strict$notrill$hypotheses;
+
+## -----------------------------------------------------------------------------
+cat("Custom priors:\n"); formlength_rough_trill_strict$full$hdi95;
+cat("\n\nDefault priors:\n"); formlength_rough_trill_strict$full_default_priors$hdi95;
+
+## -----------------------------------------------------------------------------
+summary(formlength_rough_trill_strict_glmer$model);
+
+## -----------------------------------------------------------------------------
+formlength_rough_trill_strict_glmer$cmp_to_null
+
+## -----------------------------------------------------------------------------
+formlength_rough_trill_strict_glmer$cmp_to_full
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(formlength_rough_trill_strict$notrill$summary,sep="\n"));
+formlength_rough_trill_strict$notrill$hypotheses;
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(formnormlength_rough_trill_strict$notrill$summary,sep="\n"));
+formnormlength_rough_trill_strict$notrill$hypotheses;
+
+## -----------------------------------------------------------------------------
+file_name <- "./cached/bmed_rough_len_r.RData";
+if( !file.exists(file_name) )
+{
+  # cache these results:
+  
+  # Languages with trill:
+  data_full_revised_ie_length_wt <- data_full_revised_ie_length[ data_full_revised_ie_length$revision == "trilled", c("r", "rough", "cfl2", "cfln2", "Language", "Family", "Area")];
+  set.seed(314); # for replicability
+  bmed_rough_len_r_priors <- c(
+    # shared:
+    brms::set_prior("lkj(2)", class = "cor"),
+
+    # r (bernoulli) -- use the MGN priors:
+    brms::set_prior("normal(0,3)", class = "b", resp = "r"),
+    brms::set_prior("normal(0,3)", class = "Intercept", resp = "r"),
+    brms::set_prior("exponential(4)", class = "sd", resp = "r"),
+    
+    # cfl2 (poisson) -- the same as above:
+    brms::set_prior("normal(0, 0.5)", class = "b", resp = "cfl2"),
+    brms::set_prior("normal(0, 0.5)", class = "Intercept", resp = "cfl2"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", resp = "cfl2")
+  );
+  bmed_rough_len_r__wt <- brm(bf(r ~ 1 + rough + cfl2 +  (1 + rough + cfl2 | Language) + (1 + rough + cfl2 | Family) + (1 + rough + cfl2 | Area), family="bernoulli") + # outcome
+                                bf(cfl2 ~ 1 + rough +  (1 + rough | Language) + (1 + rough | Family) + (1 + rough | Area), family="poisson") + # mediator
+                                set_rescor(FALSE),
+                              data=data_full_revised_ie_length_wt,
+                              prior=bmed_rough_len_r_priors,
+                              save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                              sample_prior=TRUE,  # needed for hypotheses tests
+                              cores=brms_ncores, seed=314);
+  summary(bmed_rough_len_r__wt); 
+  mcmc_plot(bmed_rough_len_r__wt, type="trace"); 
+  mcmc_plot(bmed_rough_len_r__wt);
+  (bmed_rough_len_r__wt_mediation <- bayestestR::mediation(bmed_rough_len_r__wt)); # no mediated effect
+  
+  # Languages withOUT trill:
+  data_full_revised_ie_length_nt <- data_full_revised_ie_length[ data_full_revised_ie_length$revision == "other", c("r", "rough", "cfl2", "cfln2", "Language", "Family", "Area")];
+  set.seed(314); # for replicability
+  bmed_rough_len_r__nt <- brm(bf(r ~ 1 + rough + cfl2 +  (1 + rough + cfl2 | Language) + (1 + rough + cfl2 | Family) + (1 + rough + cfl2 | Area), family="bernoulli") + # outcome
+                                bf(cfl2 ~ 1 + rough +  (1 + rough | Language) + (1 + rough | Family) + (1 + rough | Area), family="poisson") + # mediator
+                                set_rescor(FALSE),
+                              data=data_full_revised_ie_length_nt,
+                              prior=bmed_rough_len_r_priors,
+                              save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                              sample_prior=TRUE,  # needed for hypotheses tests
+                              cores=brms_ncores, seed=314);
+  summary(bmed_rough_len_r__nt); 
+  mcmc_plot(bmed_rough_len_r__nt, type="trace"); 
+  mcmc_plot(bmed_rough_len_r__nt);
+  (bmed_rough_len_r__nt_mediation <- bayestestR::mediation(bmed_rough_len_r__nt)); # no effect
+  
+  # omnibus test:
+  data_full_revised_ie_length_omni <- data_full_revised_ie_length[, c("r", "rough", "Trill", "cfl2", "cfln2", "Language", "Family", "Area")];
+  set.seed(314); # for replicability
+  bmed_rough_len_r__omni <- brm(bf(r ~ 1 + rough + cfl2 +  (1 + rough * Trill + cfl2 | Language) + (1 + rough * Trill + cfl2 | Family) + (1 + rough * Trill + cfl2 | Area), family="bernoulli") + # outcome
+                                  bf(cfl2 ~ 1 + rough * Trill +  (1 + rough * Trill | Language) + (1 + rough * Trill | Family) + (1 + rough * Trill | Area), family="poisson") + # mediator
+                                  set_rescor(FALSE),
+                                data=data_full_revised_ie_length_omni,
+                                prior=bmed_rough_len_r_priors,
+                                save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                                sample_prior=TRUE,  # needed for hypotheses tests
+                                cores=brms_ncores, seed=314);
+  summary(bmed_rough_len_r__omni); 
+  mcmc_plot(bmed_rough_len_r__omni, type="trace"); 
+  mcmc_plot(bmed_rough_len_r__omni);
+  (bmed_rough_len_r__omni_mediation <- bayestestR::mediation(bmed_rough_len_r__omni)); # no mediated effect
+  
+  
+  ## And using the normalized forms:
+  
+  # Languages with trill:
+  set.seed(314); # for replicability
+  bmed_rough_len_r2_priors <- c(
+    # shared:
+    brms::set_prior("lkj(2)", class = "cor"),
+
+    # r (bernoulli) -- use the MGN priors:
+    brms::set_prior("normal(0,3)", class = "b", resp = "r"),
+    brms::set_prior("normal(0,3)", class = "Intercept", resp = "r"),
+    brms::set_prior("exponential(4)", class = "sd", resp = "r"),
+    
+    # cfl2 (poisson) -- the same as above:
+    brms::set_prior("normal(0, 0.5)", class = "b", resp = "cfln2"),
+    brms::set_prior("normal(0, 0.5)", class = "Intercept", resp = "cfln2"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", resp = "cfln2")
+  );
+  bmed_rough_len_r2__wt <- brm(bf(r ~ 1 + rough + cfln2 +  (1 + rough + cfln2 | Language) + (1 + rough + cfln2 | Family) + (1 + rough + cfln2 | Area), family="bernoulli") + # outcome
+                                 bf(cfln2 ~ 1 + rough +  (1 + rough | Language) + (1 + rough | Family) + (1 + rough | Area), family="poisson") + # mediator
+                                 set_rescor(FALSE),
+                               data=data_full_revised_ie_length_wt,
+                               prior=bmed_rough_len_r2_priors,
+                               save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                               sample_prior=TRUE,  # needed for hypotheses tests
+                               cores=brms_ncores, control=list(adapt_delta = 0.99), seed=314); # adapt_delta = 0.99 needed to deal with divergent transition(s)
+  summary(bmed_rough_len_r2__wt); 
+  mcmc_plot(bmed_rough_len_r2__wt, type="trace"); 
+  mcmc_plot(bmed_rough_len_r2__wt);
+  (bmed_rough_len_r2__wt_mediation <- bayestestR::mediation(bmed_rough_len_r2__wt)); # no mediated effect
+  
+  # Languages withOUT trill:
+  set.seed(314); # for replicability
+  bmed_rough_len_r2__nt <- brm(bf(r ~ 1 + rough + cfln2 +  (1 + rough + cfln2 | Language) + (1 + rough + cfln2 | Family) + (1 + rough + cfln2 | Area), family="bernoulli") + # outcome
+                                 bf(cfln2 ~ 1 + rough +  (1 + rough | Language) + (1 + rough | Family) + (1 + rough | Area), family="poisson") + # mediator
+                                 set_rescor(FALSE),
+                               data=data_full_revised_ie_length_nt,
+                               prior=bmed_rough_len_r2_priors,
+                               save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                               sample_prior=TRUE,  # needed for hypotheses tests
+                               cores=brms_ncores, seed=314);
+  summary(bmed_rough_len_r2__nt); 
+  mcmc_plot(bmed_rough_len_r2__nt, type="trace"); 
+  mcmc_plot(bmed_rough_len_r2__nt);
+  (bmed_rough_len_r2__nt_mediation <- bayestestR::mediation(bmed_rough_len_r2__nt)); # no effect
+  
+  # omnibus test:
+  set.seed(314); # for replicability
+  bmed_rough_len_r2__omni <- brm(bf(r ~ 1 + rough + cfln2 +  (1 + rough * Trill + cfln2 | Language) + (1 + rough * Trill + cfln2 | Family) + (1 + rough * Trill + cfln2 | Area), family="bernoulli") + # outcome
+                                   bf(cfln2 ~ 1 + rough * Trill +  (1 + rough * Trill | Language) + (1 + rough * Trill | Family) + (1 + rough * Trill | Area), family="poisson") + # mediator
+                                   set_rescor(FALSE),
+                                 data=data_full_revised_ie_length_omni,
+                                 prior=bmed_rough_len_r2_priors,
+                                 save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                                 sample_prior=TRUE,  # needed for hypotheses tests
+                                 cores=brms_ncores, seed=314);
+  summary(bmed_rough_len_r2__omni); 
+  mcmc_plot(bmed_rough_len_r2__omni, type="trace"); 
+  mcmc_plot(bmed_rough_len_r2__omni);
+  (bmed_rough_len_r2__omni_mediation <- bayestestR::mediation(bmed_rough_len_r2__omni)); # no mediated effect
+
+  
+  # save the results we need later on:
+  bmed_rough_len_r <- list("with_trills"   =list("summary"=capture.output(summary(bmed_rough_len_r__wt)),   "mediation"=bmed_rough_len_r__wt_mediation),
+                           "without_trills"=list("summary"=capture.output(summary(bmed_rough_len_r__nt)),   "mediation"=bmed_rough_len_r__nt_mediation),
+                           "omnibus"       =list("summary"=capture.output(summary(bmed_rough_len_r__omni)), "mediation"=bmed_rough_len_r__omni_mediation),
+                           "with_trills_norm"   =list("summary"=capture.output(summary(bmed_rough_len_r2__wt)),   "mediation"=bmed_rough_len_r2__wt_mediation),
+                           "without_trills_norm"=list("summary"=capture.output(summary(bmed_rough_len_r2__nt)),   "mediation"=bmed_rough_len_r2__nt_mediation),
+                           "omnibus_norm"       =list("summary"=capture.output(summary(bmed_rough_len_r2__omni)), "mediation"=bmed_rough_len_r2__omni_mediation));
+  save(bmed_rough_len_r, file=file_name, compress="xz", compression_level=9); # save this model
+} else
+{
+  load(file_name);
+}
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(
+  sprintf("Direct Effect (ADE):\t % .2f 89%%HDI [% .2f, % .2f] %%(89%%HDI inside the [-0.10, 0.10] ROPE)=%.1f%%", 
+          median((tmp <- as.data.frame(bmed_rough_len_r$with_trills$mediation))$effect_direct), hdi(tmp$effect_direct, .89)[2], hdi(tmp$effect_direct, .89)[3], 100*rope(tmp$effect_direct, ci=0.89)["ROPE_Percentage"]), "\n",
+  sprintf("Indirect Effect (ACME):\t % .2f 89%%HDI [% .2f, % .2f] %%(89%%HDI inside the [-0.10, 0.10] ROPE)=%.1f%%", 
+          median(tmp$effect_indirect), hdi(tmp$effect_indirect, .89)[2], hdi(tmp$effect_indirect, .89)[3], 100*rope(tmp$effect_indirect, ci=0.89)["ROPE_Percentage"]), "\n",
+  sprintf("Mediator Effect:\t\t % .2f 89%%HDI [% .2f, % .2f] %%(89%%HDI inside the [-0.10, 0.10] ROPE)=%.1f%%", 
+          median(tmp$effect_mediator), hdi(tmp$effect_mediator, .89)[2], hdi(tmp$effect_mediator, .89)[3], 100*rope(tmp$effect_mediator, ci=0.89)["ROPE_Percentage"]), "\n",
+  sprintf("Total Effect (TE):\t\t % .2f 89%%HDI [% .2f, % .2f] %%(89%%HDI inside the [-0.10, 0.10] ROPE)=%.1f%%", 
+          median(tmp$effect_total), hdi(tmp$effect_total, .89)[2], hdi(tmp$effect_total, .89)[3], 100*rope(tmp$effect_total, ci=0.89)["ROPE_Percentage"]), "\n",
+  sprintf("Proportion mediated:\t % .1f%% 89%%HDI [% .1f%%, % .1f%%]", 
+          100*median(tmp$proportion_mediated), 100*hdi(tmp$proportion_mediated, .89)[2], 100*hdi(tmp$proportion_mediated, .89)[3]), "\n"));
+#bmed_rough_len_r$with_trills$mediation;
+
+## -----------------------------------------------------------------------------
+cat(paste0(
+  sprintf("Direct Effect (ADE):\t % .2f 89%%HDI [% .2f, % .2f] %%(89%%HDI inside the [-0.10, 0.10] ROPE)=%.1f%%", 
+          median((tmp <- as.data.frame(bmed_rough_len_r$without_trills$mediation))$effect_direct), hdi(tmp$effect_direct, .89)[2], hdi(tmp$effect_direct, .89)[3], 100*rope(tmp$effect_direct, ci=0.89)["ROPE_Percentage"]), "\n",
+  sprintf("Indirect Effect (ACME):\t % .2f 89%%HDI [% .2f, % .2f] %%(89%%HDI inside the [-0.10, 0.10] ROPE)=%.1f%%", 
+          median(tmp$effect_indirect), hdi(tmp$effect_indirect, .89)[2], hdi(tmp$effect_indirect, .89)[3], 100*rope(tmp$effect_indirect, ci=0.89)["ROPE_Percentage"]), "\n",
+  sprintf("Mediator Effect:\t\t % .2f 89%%HDI [% .2f, % .2f] %%(89%%HDI inside the [-0.10, 0.10] ROPE)=%.1f%%", 
+          median(tmp$effect_mediator), hdi(tmp$effect_mediator, .89)[2], hdi(tmp$effect_mediator, .89)[3], 100*rope(tmp$effect_mediator, ci=0.89)["ROPE_Percentage"]), "\n",
+  sprintf("Total Effect (TE):\t\t % .2f 89%%HDI [% .2f, % .2f] %%(89%%HDI inside the [-0.10, 0.10] ROPE)=%.1f%%", 
+          median(tmp$effect_total), hdi(tmp$effect_total, .89)[2], hdi(tmp$effect_total, .89)[3], 100*rope(tmp$effect_total, ci=0.89)["ROPE_Percentage"]), "\n",
+  sprintf("Proportion mediated:\t % .1f%% 89%%HDI [% .1f%%, % .1f%%]", 
+          100*median(tmp$proportion_mediated), 100*hdi(tmp$proportion_mediated, .89)[2], 100*hdi(tmp$proportion_mediated, .89)[3]), "\n"));
+#bmed_rough_len_r$without_trills$mediation;
+
+## -----------------------------------------------------------------------------
+cat(paste0(
+  sprintf("Direct Effect (ADE):\t % .2f 89%%HDI [% .2f, % .2f] %%(89%%HDI inside the [-0.10, 0.10] ROPE)=%.1f%%", 
+          median((tmp <- as.data.frame(bmed_rough_len_r$omnibus$mediation))$effect_direct), hdi(tmp$effect_direct, .89)[2], hdi(tmp$effect_direct, .89)[3], 100*rope(tmp$effect_direct, ci=0.89)["ROPE_Percentage"]), "\n",
+  sprintf("Indirect Effect (ACME):\t % .2f 89%%HDI [% .2f, % .2f] %%(89%%HDI inside the [-0.10, 0.10] ROPE)=%.1f%%", 
+          median(tmp$effect_indirect), hdi(tmp$effect_indirect, .89)[2], hdi(tmp$effect_indirect, .89)[3], 100*rope(tmp$effect_indirect, ci=0.89)["ROPE_Percentage"]), "\n",
+  sprintf("Mediator Effect:\t\t % .2f 89%%HDI [% .2f, % .2f] %%(89%%HDI inside the [-0.10, 0.10] ROPE)=%.1f%%", 
+          median(tmp$effect_mediator), hdi(tmp$effect_mediator, .89)[2], hdi(tmp$effect_mediator, .89)[3], 100*rope(tmp$effect_mediator, ci=0.89)["ROPE_Percentage"]), "\n",
+  sprintf("Total Effect (TE):\t\t % .2f 89%%HDI [% .2f, % .2f] %%(89%%HDI inside the [-0.10, 0.10] ROPE)=%.1f%%", 
+          median(tmp$effect_total), hdi(tmp$effect_total, .89)[2], hdi(tmp$effect_total, .89)[3], 100*rope(tmp$effect_total, ci=0.89)["ROPE_Percentage"]), "\n",
+  sprintf("Proportion mediated:\t % .1f%% 89%%HDI [% .1f%%, % .1f%%]", 
+          100*median(tmp$proportion_mediated), 100*hdi(tmp$proportion_mediated, .89)[2], 100*hdi(tmp$proportion_mediated, .89)[3]), "\n"));
+#bmed_rough_len_r$omnibus$mediation;
+
+## ----results='markup'---------------------------------------------------------
+cat(paste0(
+  sprintf("Direct Effect (ADE):\t % .2f 89%%HDI [% .2f, % .2f] %%(89%%HDI inside the [-0.10, 0.10] ROPE)=%.1f%%", 
+          median((tmp <- as.data.frame(bmed_rough_len_r$with_trills_norm$mediation))$effect_direct), hdi(tmp$effect_direct, .89)[2], hdi(tmp$effect_direct, .89)[3], 100*rope(tmp$effect_direct, ci=0.89)["ROPE_Percentage"]), "\n",
+  sprintf("Indirect Effect (ACME):\t % .2f 89%%HDI [% .2f, % .2f] %%(89%%HDI inside the [-0.10, 0.10] ROPE)=%.1f%%", 
+          median(tmp$effect_indirect), hdi(tmp$effect_indirect, .89)[2], hdi(tmp$effect_indirect, .89)[3], 100*rope(tmp$effect_indirect, ci=0.89)["ROPE_Percentage"]), "\n",
+  sprintf("Mediator Effect:\t\t % .2f 89%%HDI [% .2f, % .2f] %%(89%%HDI inside the [-0.10, 0.10] ROPE)=%.1f%%", 
+          median(tmp$effect_mediator), hdi(tmp$effect_mediator, .89)[2], hdi(tmp$effect_mediator, .89)[3], 100*rope(tmp$effect_mediator, ci=0.89)["ROPE_Percentage"]), "\n",
+  sprintf("Total Effect (TE):\t\t % .2f 89%%HDI [% .2f, % .2f] %%(89%%HDI inside the [-0.10, 0.10] ROPE)=%.1f%%", 
+          median(tmp$effect_total), hdi(tmp$effect_total, .89)[2], hdi(tmp$effect_total, .89)[3], 100*rope(tmp$effect_total, ci=0.89)["ROPE_Percentage"]), "\n",
+  sprintf("Proportion mediated:\t % .1f%% 89%%HDI [% .1f%%, % .1f%%]", 
+          100*median(tmp$proportion_mediated), 100*hdi(tmp$proportion_mediated, .89)[2], 100*hdi(tmp$proportion_mediated, .89)[3]), "\n"));
+#bmed_rough_len_r$with_trills$mediation;
+
+## -----------------------------------------------------------------------------
+cat(paste0(
+  sprintf("Direct Effect (ADE):\t % .2f 89%%HDI [% .2f, % .2f] %%(89%%HDI inside the [-0.10, 0.10] ROPE)=%.1f%%", 
+          median((tmp <- as.data.frame(bmed_rough_len_r$without_trills_norm$mediation))$effect_direct), hdi(tmp$effect_direct, .89)[2], hdi(tmp$effect_direct, .89)[3], 100*rope(tmp$effect_direct, ci=0.89)["ROPE_Percentage"]), "\n",
+  sprintf("Indirect Effect (ACME):\t % .2f 89%%HDI [% .2f, % .2f] %%(89%%HDI inside the [-0.10, 0.10] ROPE)=%.1f%%", 
+          median(tmp$effect_indirect), hdi(tmp$effect_indirect, .89)[2], hdi(tmp$effect_indirect, .89)[3], 100*rope(tmp$effect_indirect, ci=0.89)["ROPE_Percentage"]), "\n",
+  sprintf("Mediator Effect:\t\t % .2f 89%%HDI [% .2f, % .2f] %%(89%%HDI inside the [-0.10, 0.10] ROPE)=%.1f%%", 
+          median(tmp$effect_mediator), hdi(tmp$effect_mediator, .89)[2], hdi(tmp$effect_mediator, .89)[3], 100*rope(tmp$effect_mediator, ci=0.89)["ROPE_Percentage"]), "\n",
+  sprintf("Total Effect (TE):\t\t % .2f 89%%HDI [% .2f, % .2f] %%(89%%HDI inside the [-0.10, 0.10] ROPE)=%.1f%%", 
+          median(tmp$effect_total), hdi(tmp$effect_total, .89)[2], hdi(tmp$effect_total, .89)[3], 100*rope(tmp$effect_total, ci=0.89)["ROPE_Percentage"]), "\n",
+  sprintf("Proportion mediated:\t % .1f%% 89%%HDI [% .1f%%, % .1f%%]", 
+          100*median(tmp$proportion_mediated), 100*hdi(tmp$proportion_mediated, .89)[2], 100*hdi(tmp$proportion_mediated, .89)[3]), "\n"));
+#bmed_rough_len_r$without_trills$mediation;
+
+## -----------------------------------------------------------------------------
+cat(paste0(
+  sprintf("Direct Effect (ADE):\t % .2f 89%%HDI [% .2f, % .2f] %%(89%%HDI inside the [-0.10, 0.10] ROPE)=%.1f%%", 
+          median((tmp <- as.data.frame(bmed_rough_len_r$omnibus_norm$mediation))$effect_direct), hdi(tmp$effect_direct, .89)[2], hdi(tmp$effect_direct, .89)[3], 100*rope(tmp$effect_direct, ci=0.89)["ROPE_Percentage"]), "\n",
+  sprintf("Indirect Effect (ACME):\t % .2f 89%%HDI [% .2f, % .2f] %%(89%%HDI inside the [-0.10, 0.10] ROPE)=%.1f%%", 
+          median(tmp$effect_indirect), hdi(tmp$effect_indirect, .89)[2], hdi(tmp$effect_indirect, .89)[3], 100*rope(tmp$effect_indirect, ci=0.89)["ROPE_Percentage"]), "\n",
+  sprintf("Mediator Effect:\t\t % .2f 89%%HDI [% .2f, % .2f] %%(89%%HDI inside the [-0.10, 0.10] ROPE)=%.1f%%", 
+          median(tmp$effect_mediator), hdi(tmp$effect_mediator, .89)[2], hdi(tmp$effect_mediator, .89)[3], 100*rope(tmp$effect_mediator, ci=0.89)["ROPE_Percentage"]), "\n",
+  sprintf("Total Effect (TE):\t\t % .2f 89%%HDI [% .2f, % .2f] %%(89%%HDI inside the [-0.10, 0.10] ROPE)=%.1f%%", 
+          median(tmp$effect_total), hdi(tmp$effect_total, .89)[2], hdi(tmp$effect_total, .89)[3], 100*rope(tmp$effect_total, ci=0.89)["ROPE_Percentage"]), "\n",
+  sprintf("Proportion mediated:\t % .1f%% 89%%HDI [% .1f%%, % .1f%%]", 
+          100*median(tmp$proportion_mediated), 100*hdi(tmp$proportion_mediated, .89)[2], 100*hdi(tmp$proportion_mediated, .89)[3]), "\n"));
+#bmed_rough_len_r$omnibus$mediation;
+
+## ----results='hide', warning=FALSE, message=FALSE-----------------------------
+library(stringr);
+library(ape);
+
+# Map the ISO codes to Glottocodes:
+glottolog_data <- read.csv("./data/glottolog/languages_and_dialects_geo.csv");
+data_full_revised_ie_length[ grep(";", data_full_revised_ie_length$ISO_code, fixed=TRUE), ]; # two ISO codes
+data_full_revised_ie_length$ISO_code[ data_full_revised_ie_length$ISO_code == "ggn; gvr" ] <- "gvr"; # keep the most general one
+data_full_revised_ie_length$ISO_code[ data_full_revised_ie_length$ISO_code == "tpg; swt" ] <- "swt"; # seems this is the right language
+data_full_revised_ie_length <- merge(data_full_revised_ie_length, glottolog_data[ glottolog_data$isocodes != "", c("isocodes", "glottocode")], by.x="ISO_code", by.y="isocodes", all.x=TRUE, all.y=FALSE);
+data_full_revised_ie_length[ is.na(data_full_revised_ie_length$glottocode), ]; # matching errors
+data_full_revised_ie_length$glottocode[ data_full_revised_ie_length$ISO_code == "aze" ] <- "nort2697"; # aze does map on Glottolog -> pick North Azerbaijani
+data_full_revised_ie_length$glottocode[ data_full_revised_ie_length$ISO_code == "bua" ] <- "mong1330"; # bua should map to Mongolia Buriat
+data_full_revised_ie_length$glottocode[ data_full_revised_ie_length$ISO_code == "est" ] <- "esto1258"; # est does map on Glottolog -> pick Estonian
+data_full_revised_ie_length$glottocode[ data_full_revised_ie_length$ISO_code == "jya" ] <- "core1262"; # jya does map on Glottolog -> pick Core Gyalrong
+data_full_revised_ie_length$glottocode[ data_full_revised_ie_length$ISO_code == "mlg" ] <- "mala1537"; # mlg does map on Glottolog -> pick Malagasic
+data_full_revised_ie_length$glottocode[ data_full_revised_ie_length$ISO_code == "mon" ] <- "mong1331"; # mon does map on Glottolog -> pick Mongolian
+data_full_revised_ie_length$glottocode[ data_full_revised_ie_length$ISO_code == "swa" ] <- "swah1253"; # swa does map on Glottolog -> pick Swahili
+data_full_revised_ie_length$glottocode[ data_full_revised_ie_length$ISO_code == "uzb" ] <- "uzbe1247"; # uzb does map on Glottolog -> pick Uzbek
+
+
+# Check the tree (from ape::plot.phylo()):
+.check.phylo <- function(tree, verbose=FALSE)
+{
+  Nedge <- dim(tree$edge)[1];
+  Nnode <- tree$Nnode;
+  Ntip <- length(tree$tip.label);
+  if( Ntip < 2 ) 
+  {
+    if(verbose) warning("Less than 2 tips in the tree");
+    return (FALSE);
+  }        
+  if( any(tree$edge < 1) || any(tree$edge > Ntip + Nnode) )
+  {
+    if(verbose) warning("Tree badly conformed");
+    return (FALSE);
+  }
+  return (TRUE); # all seems ok
+}
+
+
+file_name <- "./cached/phylogenies.RData";
+if( !all(file.exists(file_name)) )
+{
+  library(castor);
+  
+  trees <- list();
+  
+  
+  ## Gerhard Jäger (2018)'s frequentist trees based on ASJP 17:
+  # Unpack, read and delete the ASJP language metadata:
+  if( !file.exists("./data/phylogenies/Jaeger_2018/asjp-v17.zip") )
+  {
+    # try to download it:
+    download.file("https://zenodo.org/record/3835942/files/lexibank/asjp-v17.zip?download=1", "./data/phylogenies/Jaeger_2018/asjp-v17.zip");
+    if( !file.exists("./data/phylogenies/Jaeger_2018/asjp-v17.zip") ) stop("Error retrieveing the ASJP-17 data!");
+  }
+  unzip("./data/phylogenies/Jaeger_2018/asjp-v17.zip", exdir="./data/phylogenies/Jaeger_2018/");
+  asjp_lgs <- read.table("./data/phylogenies/Jaeger_2018/lexibank-asjp-5114ccc/cldf/languages.csv", header=TRUE, sep=",", quote='"');
+  asjp_lgs$Name2 <- toupper(str_replace_all(asjp_lgs$Name, fixed("-"), "_")); # - seem systematically replaced by "_" in Gerhard's trees
+  asjp_lgs <- rbind(asjp_lgs, asjp_lgs[ asjp_lgs$Name2 == "WEMBAWEMBA", ]); asjp_lgs$Name2[ nrow(asjp_lgs) ] <- "WEMBA_WEMBA"; # in Gerhard's trees it appears also as WEMBA_WEMBA
+  unlink("./data/phylogenies/Jaeger_2018/lexibank-asjp-5114ccc", recursive=TRUE);
+  
+  # Unpack, read and delete Gerhard's trees:
+  if( !file.exists("./data/phylogenies/Jaeger_2018/trees.zip") )
+  {
+    stop("Please download the 'trees' subfolder of the https://osf.io/cufv7/ OSF repository ( DOI 10.17605/OSF.IO/CUFV7) as ZIP file!");
+  }
+  unzip("./data/phylogenies/Jaeger_2018/trees.zip", exdir="./data/phylogenies/Jaeger_2018/trees/");
+  
+  # Read and process Gerhard's trees:
+  .read.gerhard.tree <- function(tree_name, 
+                                 lgs_to_keep=data_full_revised_ie_length$glottocode,
+                                 min_n_lgs_per_fam=1)
+  {
+    # Read the tree:
+    if( !file.exists(paste0("./data/phylogenies/Jaeger_2018/trees/",tree_name,".tre")) ) 
+    {
+      warning(paste0("Tree for '",tree_name,"' was not found!"));
+      return (NULL);
+    }
+    tree <- read.tree(paste0("./data/phylogenies/Jaeger_2018/trees/",tree_name,".tre"));
+    if( is.null(tree) ) return (NULL);
+    
+    # Map the tips to Glottolog codes:
+    tree$tip.label <- vapply(tree$tip.label, function(s)
+    {
+      s.asjp <- toupper(strsplit(s,".",fixed=TRUE)[[1]][3]);
+      if( is.null(s.asjp) || is.na(s.asjp) ){ warning(paste0("No ASJP name can be extracted from language '",s,"'.")); return (NA_character_); }
+      s.glottolog <- unique(asjp_lgs$Glottocode[ asjp_lgs$Name2 == s.asjp ]);
+      if( length(s.glottolog) == 0 ){ warning(paste0("No match found in the ASJP database for language '",s,"'.")); return (NA_character_); }
+      if( length(s.glottolog) > 1 ){ warning(paste0("More than one matching Glottolog code found in the ASJP database for language '",s,"': ",paste0(s.glottolog,collapse=", ")," -- picking the first one.")); return (s.glottolog[1]); }
+      return (s.glottolog);
+    }, character(1));
+    
+    # Trim the tree to the available data:
+    if( !.check.phylo(tree) )
+    {
+      warning(paste0("The tree for  '",tree_name,"' has well-fromedness issues."));
+      return (NULL);
+    }
+    
+    tree <- drop.tip(tree, which(!(tree$tip.label %in% lgs_to_keep)), trim.internal=TRUE);
+    if( is.null(tree) ){ warning(paste0("The tree for  '",tree_name,"' is has no data in our database.")); return (NULL); }
+    dup.tips <- duplicated(tree$tip.label); # duplicated tips
+    tree <- drop.tip(tree, which(dup.tips), trim.internal=TRUE); # drop them and keep the first occurrence
+    if( length(tree$tip.label) == 1 ){ warning(paste0("The tree for  '",tree_name,"' is degenerate when intersected with our database.")); return (NULL); }
+    if( has.singles(tree) ) tree <- collapse.singles(tree, root.edge=TRUE);
+    tree$edge.length[ tree$edge.length <= 0.0 ] <- min(tree$edge.length[ tree$edge.length > 0.0 ], na.rm=TRUE) / 10.0; # make sure there are no 0-length branches
+    
+    if( length(tree$tip.label) < min_n_lgs_per_fam )
+    {
+      warning(paste0("The tree for  '",tree_name,"' has less than ",min_n_lgs_per_fam," languages: dropping it."));
+      return (NULL);
+    }
+    
+    return (tree);
+  }
+  
+  # Try to load Gerhard's trees and keep only the world tree:
+  tree_names <- list.files("./data/phylogenies/Jaeger_2018/trees/", pattern=glob2rx("*.tre"), all.files=TRUE, full.names=FALSE, recursive=FALSE, include.dirs=FALSE);
+  trees[[length(trees)+1]] <- .read.gerhard.tree("world"); names(trees)[length(trees)] <- "jaeg18";
+  
+  # Delete the temporary folder and files:
+  unlink("./data/phylogenies/Jaeger_2018/trees", recursive=TRUE);
+  
+  
+  ## The MCC global phylogeny from Bouckaert et al. (2022):
+  b22_tree <- NULL;
+  if( !file.exists("./data/phylogenies/Bouckaert_etal_2022/global-language-tree-MCC-labelled.tree.gz") ) 
+  {
+    # try to download it:
+    download.file("https://github.com/rbouckaert/global-language-tree-pipeline/releases/download/v1.0.0/global-language-tree-MCC-labelled.tree.gz", "./data/phylogenies/Bouckaert_etal_2022/global-language-tree-MCC-labelled.tree.gz");
+    if( !file.exists("./data/phylogenies/Bouckaert_etal_2022/global-language-tree-MCC-labelled.tree.gz") ) warning("Please download the MCC global phylogeny 'global-language-tree-MCC-labelled.tree.gz' from https://github.com/rbouckaert/global-language-tree-pipeline/releases/ (Release 1.0.0, Jul 10, 2022)");
+  }
+  if( file.exists("./data/phylogenies/Bouckaert_etal_2022/global-language-tree-MCC-labelled.tree.gz") ) 
+  {
+    b22_tree <- read.nexus(gzfile("./data/phylogenies/Bouckaert_etal_2022/global-language-tree-MCC-labelled.tree.gz"));
+    if( is.null(b22_tree) )
+    {
+      warning("Issues reading the global tree of Bouckaert et al. (2022).");
+    } else
+    {
+      b22_tree$tip.label <- vapply(b22_tree$tip.label, function(s) substring(s,1,8), character(1)); # keep just the glottocode for the tips
+      
+      # Trim the tree to the available data:
+      if( !.check.phylo(b22_tree) )
+      {
+        warning(paste0("The global tree of Bouckaert et al. (2022) has well-fromedness issues."));
+        return (NULL);
+      }
+      
+      lgs_to_keep <- data_full_revised_ie_length$glottocode;
+      b22_tree <- drop.tip(b22_tree, which(!(b22_tree$tip.label %in% lgs_to_keep)), trim.internal=TRUE);
+      if( is.null(b22_tree) ){ warning(paste0("The global tree of Bouckaert et al. (2022) is has no data in our database.")); b22_tree <- NULL; }
+      dup.tips <- duplicated(b22_tree$tip.label); # duplicated tips
+      b22_tree <- drop.tip(b22_tree, which(dup.tips), trim.internal=TRUE); # drop them and keep the first occurrence
+      if( length(b22_tree$tip.label) == 1 ){ warning(paste0("The global tree of Bouckaert et al. (2022) is degenrate when intersected with our database.")); b22_tree <- NULL; }
+      if( has.singles(b22_tree) ) b22_tree <- collapse.singles(b22_tree, root.edge=TRUE);
+      b22_tree$edge.length[ b22_tree$edge.length <= 0.0 ] <- min(b22_tree$edge.length[ b22_tree$edge.length > 0.0 ], na.rm=TRUE) / 10.0; # make sure there are no 0-length branches
+      
+      if( length(b22_tree$tip.label) < 1 )
+      {
+        warning(paste0("The global tree has less than ",min_n_lgs_per_fam," languages: dropping it."));
+        b22_tree <- NULL;
+      }
+
+      if( !is.null(b22_tree) )
+      {
+        # Store it:
+        trees[[length(trees)+1]] <- b22_tree; names(trees)[length(trees)] <- "betal22";
+      }
+    }
+  } else
+  {
+    warning("Issues reading the global tree of Bouckaert et al. (2022).");
+  }
+  
+  
+  # Finally, assemble the various results and save them:
+  save(trees, file=file_name, compress="xz", compression_level=9);
+} else
+{
+  load(file_name);
+} 
+
+## ----results='hide', warning=FALSE, message=FALSE-----------------------------
+## Use Gerhard Jäger (2018) global tree
+file_name <- "./cached/worldtree_jaeg18.RData";
+if( !file.exists(file_name) ) # all this stuff is **very** computationally expensive!!!
+{
+  # Select and align the data to the tree:
+  tree <- trees$jaeg18;
+  n_lgs_to_keep <- length(intersect(tree$tip.label, data_full_revised_ie_length$glottocode)); # 273 language remain
+  n_lgs_lost    <- length(setdiff(data_full_revised_ie_length$glottocode, tree$tip.label)); # 18 languages lost
+  d <- unique(data_full_revised_ie_length[ data_full_revised_ie_length$glottocode %in% tree$tip.label, ]);
+  d$phylo <- d$glottocode; # duplicate it as per https://rdrr.io/cran/brms/f/vignettes/brms_phylogenetics.Rmd
+  d$latitude_r  <- 1.0 - cos(d$Latitude_fixed * (pi/180)); # make sure these longitudes are still highest at the poles
+  d$longitude_r <- cos(d$Longitude_fixed * (pi/180));
+  
+  # Phylogenetic variance-covariance matrix:
+  A <- ape::vcv.phylo(tree, corr=TRUE); # as per MGN's suggestion (seems to improve prediction)
+
+  # check the priors that we can set:
+  get_prior(r ~ 1 + rough * Trill + cfln2 + # the relevant predictors
+              (1 + rough * Trill + cfln2 | gr(phylo, cov=A)) + 
+              (1 + rough * Trill + cfln2 | glottocode) + # the "world" tree allowing multiple observations per language as per https://rdrr.io/cran/brms/f/vignettes/brms_phylogenetics.Rmd
+              (1 + rough * Trill + cfln2 | Area), # area as random effect
+            family=bernoulli(link="logit"), 
+            data=d, data2=list(A=A));
+  # setting the priors (use MGN's generic priors):
+  b1_priors <- c(
+    brms::set_prior("normal(0,3)", class = "b"),
+    brms::set_prior("normal(0,3)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("exponential(4)", class = "sd")
+  ); # for the full model
+  # prior predictive checks:
+  set.seed(314); # for replicability
+  b_prior <- brms::brm(r ~ 1 + rough * Trill + cfln2 + # the relevant predictors
+                         (1 + rough * Trill + cfln2 | gr(phylo, cov=A)) + 
+                         (1 + rough * Trill + cfln2 | glottocode) + # the "world" tree allowing multiple observations per language as per https://rdrr.io/cran/brms/f/vignettes/brms_phylogenetics.Rmd
+                         (1 + rough * Trill + cfln2 | Area), # area as random effect
+                       data=d, data2=list(A=A),
+                       prior=b1_priors,
+                       family=bernoulli(link="logit"), 
+                       sample_prior='only',  # needed for prior predictive checks
+                       cores=brms_ncores, seed=413);
+  # save the results we need later on:
+  plot_prefix <- "./figures/phylo_full";
+  g <- arrangeGrob(pp_check(b_prior, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Prior predictive distribution of minimum values'),
+                   pp_check(b_prior, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Prior predictive distribution of means'),
+                   pp_check(b_prior, type='stat', stat='max') + xlab('p(r)') + ggtitle('Prior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min, even if the mean is a bit off)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_prior_predictive_checks.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+   
+  # fit the logistic model:
+  set.seed(314); # for replicability
+  b1 <- brms::brm(r ~ 1 + rough * Trill + cfln2 + # the relevant predictors
+                    (1 + rough * Trill + cfln2 | gr(phylo, cov=A)) + 
+                    (1 + rough * Trill + cfln2 | glottocode) + # the "world" tree allowing multiple observations per language as per https://rdrr.io/cran/brms/f/vignettes/brms_phylogenetics.Rmd
+                    (1 + rough * Trill + cfln2 | Area), # area as random effect
+                  data=d, data2=list(A=A),
+                  prior=b1_priors,
+                  family=bernoulli(link="logit"),
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, iter=6000, seed=413); # iter=6000 needed to deal with ESS too low
+  summary(b1); mcmc_plot(b1, type="trace"); mcmc_plot(b1);
+  (hyps_full <- brms::hypothesis(b1, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0", "roughyes:Trillyes = 0", "cfln2 = 0")));
+  (hdi95_full <- hdi(b1, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_full <- "./figures/phylo_full";
+  mcmc_plot(b1, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b1, variable="^b_", regex=TRUE); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b1, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_full <- capture.output(summary(b1));
+  probs_text_full <- capture.output(probs_full <- logistic_summary(b1, dat=d, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b1, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b1, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  b1 <- brms_fit_indices(b1, indices=c("bayes_R2", "loo", "waic"), moment_match=TRUE); # KFOLD is very slow even if it is suggested
+  # saveRDS(b1, file="~/Temp/b1.RData", compress="xz"); # takes a long time to do it and we manually simplify from it, so make a safe copy in case all crashes so we can continue...
+  # b1 <- readRDS("~/Temp/b1.RData");
+  m_full <- b1;
+  
+  # check if the repeated measures (1 | glottocode) do matter:
+  set.seed(314); # for replicability
+  b1g <- brms::brm(r ~ 1 + rough * Trill + cfln2 + # the relevant predictors
+                     (1 + rough * Trill + cfln2 | gr(phylo, cov=A)) + 
+                     (1 + rough * Trill + cfln2 | Area), # area as random effect
+                   data=d, data2=list(A=A),
+                   prior=b1_priors,
+                   family=bernoulli(link="logit"),
+                   save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                   sample_prior=TRUE,  # needed for hypotheses tests
+                   cores=brms_ncores, iter=4000, seed=413); # iter=4000 needed to deal with ESS too low
+  summary(b1g); mcmc_plot(b1g, type="trace"); mcmc_plot(b1g);
+  brms::hypothesis(b1g, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0", "roughyes:Trillyes = 0", "cfln2 = 0"));
+  hdi(b1g, ci=0.95);
+  b1g <- brms_fit_indices(b1g, indices=c("bayes_R2", "loo", "waic"), moment_match=TRUE); # KFOLD is very slow even if it is suggested
+  (modcmp_glottocode <- brms_compare_models(b1, b1g, "[+ (1 | glottocode)]", "[- (1 | glottocode)]", bayes_factor=brms_bayes_factors)); # virtually equivalent, also in terms of estimates and formal hypothesis testing 
+  # -> so, the (1 | glottocode) term is not needed!
+  m_full <- b1g;
+  (hyps_full <- brms::hypothesis(m_full, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0", "roughyes:Trillyes = 0", "cfln2 = 0")));
+  (hdi95_full <- hdi(m_full, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_full <- "./figures/phylo_full";
+  mcmc_plot(m_full, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(m_full, variable="^b_", regex=TRUE); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(m_full, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_full <- capture.output(summary(m_full));
+  probs_text_full <- capture.output(probs_full <- logistic_summary(m_full, dat=d, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(m_full, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(m_full, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(m_full, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(m_full, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  # saveRDS(m_full, file="~/Temp/m_full.RData", compress="xz"); # takes a long time to do it and we manually simplify from it, so make a safe copy in case all crashes so we can continue...
+  # m_full <- b1g <- readRDS("~/Temp/m_full.RData");
+
+  # model comparison with the null model:
+  b0_priors <- c(
+    brms::set_prior("normal(0,3)", class = "Intercept"),
+    brms::set_prior("exponential(4)", class = "sd")
+  ); # for the null model
+  b0 <- brms::brm(r ~ 1 + # the relevant predictors
+                    (1 | gr(phylo, cov=A)) + 
+                    (1 | Area), # area as random effect
+                  data=d, data2=list(A=A),
+                  prior=b0_priors,
+                  family=bernoulli(link="logit"),
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, seed=314);
+  summary(b0); 
+  mcmc_plot(b0, type="trace"); 
+  mcmc_plot(b0);
+  b0 <- brms_fit_indices(b0, indices=c("bayes_R2", "loo", "waic"), moment_match=TRUE);
+  (modcmp_0_full <- brms_compare_models(b0, m_full, "[null]", "[full]", bayes_factor=brms_bayes_factors)); # full is much better than the null (BFs don't work though)
+  # saveRDS(b0, file="~/Temp/b0.RData", compress="xz"); # takes a long time to do it and we manually simplify from it, so make a safe copy in case all crashes so we can continue...
+  # b0 <- readRDS("~/Temp/b0.RData");
+  
+  # let's see if the interaction matters:
+  set.seed(314); # for replicability
+  b2 <- brms::brm(r ~ 1 + rough + Trill + cfln2 + # the relevant predictors
+                    (1 + rough + Trill + cfln2 | gr(phylo, cov=A)) + 
+                    (1 + rough + Trill + cfln2 | Area), # area as random effect
+                  data=d, data2=list(A=A),
+                  prior=b1_priors,
+                  family=bernoulli(link="logit"),
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, iter=4000, seed=413); # iter=4000 needed to deal with ESS too low
+  summary(b2); mcmc_plot(b2, type="trace"); mcmc_plot(b2);
+  (hyps_noint <- brms::hypothesis(b2, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0", "cfln2 = 0")));
+  (hdi95_noint <- hdi(b2, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_noint <- "./figures/phylo_noint";
+  mcmc_plot(b2, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b2); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b2, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_noint <- capture.output(summary(b2));
+  probs_text_noint <- capture.output(probs_noint <- logistic_summary(b2, dat=d, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b2, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b2, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b2, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b2, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  b2 <- brms_fit_indices(b2, indices=c("bayes_R2", "loo", "waic"), moment_match=TRUE);
+  m_noint <- b2;
+  (modcmp_noint_0    <- brms_compare_models(m_noint, b0,     "[noint]", "[null]", bayes_factor=brms_bayes_factors)); # noint is much better than the null
+  (modcmp_noint_full <- brms_compare_models(m_noint, m_full, "[noint]", "[full]", bayes_factor=brms_bayes_factors)); # they are equivalent
+  # saveRDS(b2, file="~/Temp/b2.RData", compress="xz"); # takes a long time to do it and we manually simplify from it, so make a safe copy in case all crashes so we can continue...
+  # m_noint <- b2 <- readRDS("~/Temp/b2.RData");
+
+  # check if Trill is needed at all (because it seems it might not):
+  set.seed(314); # for replicability
+  b3 <- brms::brm(r ~ 1 + rough + cfln2 + # the relevant predictors
+                    (1 + rough + cfln2 | gr(phylo, cov=A)) + 
+                    (1 + rough + cfln2 | Area), # area as random effect
+                  data=d, data2=list(A=A),
+                  prior=b1_priors,
+                  family=bernoulli(link="logit"),
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, iter=6000, seed=413); # iter=6000 needed to deal with ESS too low
+  summary(b3); mcmc_plot(b3, type="trace"); mcmc_plot(b3);
+  (hyps_notrill <- brms::hypothesis(b3, c("roughyes = 0", "roughyes > 0", "cfln2 = 0", "cfln2 > 0")));
+  (hdi95_notrill <- hdi(b3, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_notrill <- "./figures/phylo_notrill";
+  mcmc_plot(b3, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b3); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b3, type="pred", terms=c("rough")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_notrill <- capture.output(summary(b3));
+  probs_text_notrill <- capture.output(probs_notrill <- logistic_summary(b3, dat=data_full_revised_allmeanings_ie_length, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b3, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b3, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b3, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b3, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  b3 <- brms_fit_indices(b3, indices=c("bayes_R2", "loo", "waic"), moment_match=TRUE);
+  m_notrill <- b3;
+  # model comparisons
+  (modcmp_0_notrill     <- brms_compare_models(b0,      m_notrill, "[null]",  "[notrill]", bayes_factor=brms_bayes_factors)); # notrill is much better than null
+  (modcmp_full_notrill  <- brms_compare_models(m_full,  m_notrill, "[full]",  "[notrill]", bayes_factor=brms_bayes_factors)); # better than full
+  (modcmp_noint_notrill <- brms_compare_models(m_noint, m_notrill, "[noint]", "[notrill]", bayes_factor=brms_bayes_factors)); # possibly better than noinit
+  # saveRDS(b3, file="~/Temp/b3.RData", compress="xz"); # takes a long time to do it and we manually simplify from it, so make a safe copy in case all crashes so we can continue...
+  # m_notrill <- b3 <- readRDS("~/Temp/b3.RData");
+  # -> so, Trill is not needed apparently...
+
+  # check if cfln2 is needed:
+  set.seed(314); # for replicability
+  b4 <- brms::brm(r ~ 1 + rough + # the relevant predictors
+                    (1 + rough | gr(phylo, cov=A)) + 
+                    (1 + rough | Area), # area as random effect
+                  data=d, data2=list(A=A),
+                  prior=b1_priors,
+                  family=bernoulli(link="logit"),
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, iter=4000, seed=413); # iter=4000 needed to deal with ESS too low);
+  summary(b4); mcmc_plot(b4, type="trace"); mcmc_plot(b4);
+  (hyps_nocfl2 <- brms::hypothesis(b4, c("roughyes = 0", "roughyes > 0")));
+  (hdi95_nocfl2 <- hdi(b4, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_nocfl2 <- "./figures/phylo_nocfl2";
+  mcmc_plot(b4, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b4); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b4, type="pred", terms=c("rough")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_nocfl2 <- capture.output(summary(b4));
+  probs_text_nocfl2 <- capture.output(probs_nocfl2 <- logistic_summary(b4, dat=data_full_revised_allmeanings_ie_length, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b4, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b4, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b4, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b4, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  b4 <- brms_fit_indices(b4, indices=c("bayes_R2", "loo", "waic"), moment_match=TRUE);
+  m_nocfl2 <- b4;
+  # model comparisons
+  (modcmp_0_nocfl2       <- brms_compare_models(b0,        m_nocfl2, "[null]",    "[nocfl2]", bayes_factor=brms_bayes_factors)); # much better than null
+  (modcmp_full_nocfl2    <- brms_compare_models(m_full,    m_nocfl2, "[full]",    "[nocfl2]", bayes_factor=brms_bayes_factors)); # nocfl2 is worse than full
+  (modcmp_noint_nocfl2   <- brms_compare_models(m_noint,   m_nocfl2, "[noint]",   "[nocfl2]", bayes_factor=brms_bayes_factors)); # nocfl2 is worse than noint
+  (modcmp_notrill_nocfl2 <- brms_compare_models(m_notrill, m_nocfl2, "[notrill]", "[nocfl2]", bayes_factor=brms_bayes_factors)); # nocfl2 is worse than notrill
+  # saveRDS(b4, file="~/Temp/b4.RData", compress="xz"); # takes a long time to do it and we manually simplify from it, so make a safe copy in case all crashes so we can continue...
+  # m_nocfl2 <- b4 <- readRDS("~/Temp/b4.RData");
+  # -> cfln2 is needed after all...
+  
+  
+  ## Replace (... | Area) by a 2D Gaussian process:
+  set.seed(314); # for replicability
+  b5 <- brms::brm(r ~ 1 + rough + cfln2 + # the relevant predictors
+                    (1 + rough + cfln2 | gr(phylo, cov=A)) + 
+                    gp(longitude_r, latitude_r, by=Area, gr=TRUE, scale=FALSE), # 2DGP by Area
+                  data=d, data2=list(A=A),
+                  prior=b1_priors,
+                  family=bernoulli(link="logit"),
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, iter=4000, control=list(adapt_delta=0.99), seed=413); # iter=4000 needed to deal with ESS too low); adapt_delta=0.99 to deal with divergent transition(s)
+  summary(b5); mcmc_plot(b5, type="trace"); mcmc_plot(b5);
+  (hyps_gp <- brms::hypothesis(b5, c("roughyes = 0", "roughyes > 0", "cfln2 = 0", "cfln2 > 0")));
+  (hdi95_gp <- hdi(b5, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_gp <- "./figures/phylo_gp";
+  mcmc_plot(b5, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b5); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b5, type="pred", terms=c("rough")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_gp <- capture.output(summary(b5));
+  probs_text_gp <- capture.output(probs_gp <- logistic_summary(b5, dat=data_full_revised_allmeanings_ie_length, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b5, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b5, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b5, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b5, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  b5 <- brms_fit_indices(b5, indices=c("bayes_R2", "loo", "waic"), moment_match=TRUE);
+  m_gp <- b5;
+  # model comparisons
+  (modcmp_0_gp       <- brms_compare_models(b0,        m_gp, "[null]",    "[gp]", bayes_factor=brms_bayes_factors)); # much better than null
+  (modcmp_notrill_gp <- brms_compare_models(m_notrill, m_gp, "[notrill]", "[gp]", bayes_factor=brms_bayes_factors)); # equivalent
+  # saveRDS(b5, file="~/Temp/b5.RData", compress="xz"); # takes a long time to do it and we manually simplify from it, so make a safe copy in case all crashes so we can continue...
+  # m_gp <- b5 <- readRDS("~/Temp/b5.RData");
+  # -> 2DGP is essentially identical to using Areas as random effects
+
+  # So, the best model is notrill: 
+  m_best <- m_notrill;
+
+  # Given that the best model seems to be the one with rough + cfln2, let's see if this is not really a mediation model rough -> cfln2 -> r:
+  set.seed(314); # for replicability
+  bmed_rough_len_r__wt_priors <- c(
+    # shared:
+    brms::set_prior("lkj(2)", class = "cor"),
+
+    # r (bernoulli) -- use the MGN priors:
+    brms::set_prior("normal(0,3)", class = "b", resp = "r"),
+    brms::set_prior("normal(0,3)", class = "Intercept", resp = "r"),
+    brms::set_prior("exponential(4)", class = "sd", resp = "r"),
+    
+    # cfln2 (poisson) -- the same as above:
+    brms::set_prior("normal(0, 0.5)", class = "b", resp = "cfln2"),
+    brms::set_prior("normal(0, 0.5)", class = "Intercept", resp = "cfln2"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", resp = "cfln2")
+  );
+  bmed_rough_len_r__wt <- brm(bf(r ~ 1 + rough + cfln2 + # the relevant predictors
+                                   (1 + rough + cfln2 | gr(phylo, cov=A)) + 
+                                   (1 + rough + cfln2 | Area),
+                                 family=bernoulli(link="logit")) + # outcome
+                                bf(cfln2 ~ 1 + rough + 
+                                     (1 + rough | gr(phylo, cov=A)) + 
+                                     (1 + rough | Area), 
+                                   family="poisson") + # mediator
+                                set_rescor(FALSE),
+                              data=d, data2=list(A=A),
+                              prior=bmed_rough_len_r__wt_priors,
+                              save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                              sample_prior=TRUE,  # needed for hypotheses tests
+                              cores=brms_ncores, control=list(adapt_delta = 0.99), iter=6000, seed=314); # adapt_delta = 0.99 needed to deal with divergent transition(s); iter=6000 needed to deal with ESS too low)
+  summary(bmed_rough_len_r__wt); 
+  mcmc_plot(bmed_rough_len_r__wt, type="trace"); 
+  mcmc_plot(bmed_rough_len_r__wt);
+  (bmed_rough_len_r__wt_mediation <- bayestestR::mediation(bmed_rough_len_r__wt)); # no mediated effect
+  summary_mediation <- capture.output(summary(bmed_rough_len_r__wt));
+  # saveRDS(bmed_rough_len_r__wt, file="~/Temp/bmed_rough_len_r__wt.RData", compress="xz"); # takes a long time to do it and we manually simplify from it, so make a safe copy in case all crashes so we can continue...
+  # bmed_rough_len_r__wt <- readRDS("~/Temp/bmed_rough_len_r__wt.RData");
+  
+  
+  # Save these results:
+  worldtree_jaeg18 <- list(
+    data=d,
+    tree=tree,
+    n_lgs_kept=n_lgs_to_keep, n_lgs_lost=n_lgs_lost,
+    "full"=list("model"=NULL, #m_full, # needed for later comparisons
+                "summary"=summary_mod_full, "hypotheses"=hyps_full, "hdi95"=hdi95_full, 
+                "cmp_to_null"=modcmp_0_full, "probs"=probs_full, "probs_text"=probs_text_full, "plot_prefix"=plot_prefix_full),
+    "cmp_glottocode"=modcmp_glottocode,
+    "noint"=list("model"=NULL, #m_noint, # needed for later comparisons
+                 "summary"=summary_mod_noint, "hypotheses"=hyps_noint, "hdi95"=hdi95_noint, 
+                 "cmp_to_null"=modcmp_noint_0,  "cmp_to_full"=modcmp_noint_full, "probs"=probs_noint, "probs_text"=probs_text_noint, "plot_prefix"=plot_prefix_noint),
+    "notrill"=list("model"=NULL, #m_notrill, # needed for later comparisons
+                   "summary"=summary_mod_notrill, "hypotheses"=hyps_notrill, "hdi95"=hdi95_notrill, 
+                   "cmp_to_null"=modcmp_0_notrill,  "cmp_to_full"=modcmp_full_notrill, "cmp_to_noint"=modcmp_noint_notrill, 
+                   "probs"=probs_notrill, "probs_text"=probs_text_notrill, "plot_prefix"=plot_prefix_notrill),
+    "nocfl2"=list("model"=NULL, #m_nocfl2, # needed for later comparisons
+                  "summary"=summary_mod_nocfl2, "hypotheses"=hyps_nocfl2, "hdi95"=hdi95_nocfl2, 
+                  "cmp_to_null"=modcmp_0_nocfl2,  "cmp_to_full"=modcmp_full_nocfl2, "cmp_to_noint"=modcmp_noint_nocfl2, "cmp_to_notrill"=modcmp_notrill_nocfl2,  
+                  "probs"=probs_nocfl2, "probs_text"=probs_text_nocfl2, "plot_prefix"=plot_prefix_nocfl2),
+    "gp"=list("model"=NULL, #m_gp, # needed for later comparisons
+                  "summary"=summary_mod_gp, "hypotheses"=hyps_gp, "hdi95"=hdi95_gp, 
+                  "cmp_to_notrill"=modcmp_notrill_gp),
+    "best"="notrill",
+    "mediation"=list("summary"=summary_mediation, "mediation"=bmed_rough_len_r__wt_mediation)
+  );
+  save(worldtree_jaeg18, file=file_name, compress="xz", compression_level=9);
+} else
+{
+  load(file_name);
+} 
+
+## ----results='markup'---------------------------------------------------------
+worldtree_jaeg18$notrill$hypotheses;
+
+## -----------------------------------------------------------------------------
+cat(worldtree_jaeg18$notrill$summary, sep="\n");
+worldtree_jaeg18$notrill$hypotheses;
+
+## -----------------------------------------------------------------------------
+cat(worldtree_jaeg18$gp$summary, sep="\n");
+worldtree_jaeg18$gp$hypotheses;
+
+## ----results='hide', warning=FALSE, message=FALSE-----------------------------
+## Use Bouckaert et al. (2022) global tree
+file_name <- "./cached/worldtree_betal22.RData";
+if( !file.exists(file_name) ) # all this stuff is **very** computationally expensive!!!
+{
+  # Select and align the data to the tree:
+  tree <- trees$betal22;
+  n_lgs_to_keep <- length(intersect(tree$tip.label, data_full_revised_ie_length$glottocode)); # 275 language remain
+  n_lgs_lost    <- length(setdiff(data_full_revised_ie_length$glottocode, tree$tip.label)); # 16 languages lost
+  d <- unique(data_full_revised_ie_length[ data_full_revised_ie_length$glottocode %in% tree$tip.label, ]);
+  d$phylo <- d$glottocode; # duplicate it as per https://rdrr.io/cran/brms/f/vignettes/brms_phylogenetics.Rmd
+  d$latitude_r  <- 1.0 - cos(d$Latitude_fixed * (pi/180)); # make sure these longitudes are still highest at the poles
+  d$longitude_r <- cos(d$Longitude_fixed * (pi/180));
+  
+  # Phylogenetic variance-covariance matrix:
+  A <- ape::vcv.phylo(tree, corr=TRUE); # as per MGN's suggestion (seems to improve prediction)
+
+  # check the priors that we can set:
+  get_prior(r ~ 1 + rough * Trill + cfln2 + # the relevant predictors
+              (1 + rough * Trill + cfln2 | gr(phylo, cov=A)) + 
+              (1 + rough * Trill + cfln2 | glottocode) + # the "world" tree allowing multiple observations per language as per https://rdrr.io/cran/brms/f/vignettes/brms_phylogenetics.Rmd
+              (1 + rough * Trill + cfln2 | Area), # area as random effect
+            family=bernoulli(link="logit"), 
+            data=d, data2=list(A=A));
+  # setting the priors (use MGN's generic priors):
+  b1_priors <- c(
+    brms::set_prior("normal(0,3)", class = "b"),
+    brms::set_prior("normal(0,3)", class = "Intercept"),
+    brms::set_prior("lkj(2)", class = "cor"),
+    brms::set_prior("exponential(4)", class = "sd")
+  ); # for the full model
+  # prior predictive checks:
+  set.seed(314); # for replicability
+  b_prior <- brms::brm(r ~ 1 + rough * Trill + cfln2 + # the relevant predictors
+                         (1 + rough * Trill + cfln2 | gr(phylo, cov=A)) + 
+                         (1 + rough * Trill + cfln2 | glottocode) + # the "world" tree allowing multiple observations per language as per https://rdrr.io/cran/brms/f/vignettes/brms_phylogenetics.Rmd
+                         (1 + rough * Trill + cfln2 | Area), # area as random effect
+                       data=d, data2=list(A=A),
+                       prior=b1_priors,
+                       family=bernoulli(link="logit"), 
+                       sample_prior='only',  # needed for prior predictive checks
+                       cores=brms_ncores, seed=413);
+  # save the results we need later on:
+  plot_prefix <- "./figures/phylo_full2";
+  g <- arrangeGrob(pp_check(b_prior, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Prior predictive distribution of minimum values'),
+                   pp_check(b_prior, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Prior predictive distribution of means'),
+                   pp_check(b_prior, type='stat', stat='max') + xlab('p(r)') + ggtitle('Prior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min, even if the mean is a bit off)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_prior_predictive_checks.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+   
+  # fit the logistic model:
+  set.seed(314); # for replicability
+  b1 <- brms::brm(r ~ 1 + rough * Trill + cfln2 + # the relevant predictors
+                    (1 + rough * Trill + cfln2 | gr(phylo, cov=A)) + 
+                    (1 + rough * Trill + cfln2 | glottocode) + # the "world" tree allowing multiple observations per language as per https://rdrr.io/cran/brms/f/vignettes/brms_phylogenetics.Rmd
+                    (1 + rough * Trill + cfln2 | Area), # area as random effect
+                  data=d, data2=list(A=A),
+                  prior=b1_priors,
+                  family=bernoulli(link="logit"),
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), iter=6000, seed=413); # iter=6000 needed to deal with ESS too low; adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b1); mcmc_plot(b1, type="trace"); mcmc_plot(b1);
+  (hyps_full <- brms::hypothesis(b1, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0", "roughyes:Trillyes = 0", "cfln2 = 0")));
+  (hdi95_full <- hdi(b1, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_full <- "./figures/phylo_full2";
+  mcmc_plot(b1, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b1, variable="^b_", regex=TRUE); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b1, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_full <- capture.output(summary(b1));
+  probs_text_full <- capture.output(probs_full <- logistic_summary(b1, dat=d, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b1, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b1, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b1, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b1, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  b1 <- brms_fit_indices(b1, indices=c("bayes_R2", "loo", "waic"), moment_match=TRUE); # KFOLD is very slow even if it is suggested
+  # saveRDS(b1, file="~/Temp/b1_2.RData", compress="xz"); # takes a long time to do it and we manually simplify from it, so make a safe copy in case all crashes so we can continue...
+  # b1 <- readRDS("~/Temp/b1_2.RData");
+  m_full <- b1;
+  
+  # check if the repeated measures (1 | glottocode) do matter:
+  set.seed(314); # for replicability
+  b1g <- brms::brm(r ~ 1 + rough * Trill + cfln2 + # the relevant predictors
+                     (1 + rough * Trill + cfln2 | gr(phylo, cov=A)) + 
+                     (1 + rough * Trill + cfln2 | Area), # area as random effect
+                   data=d, data2=list(A=A),
+                   prior=b1_priors,
+                   family=bernoulli(link="logit"),
+                   save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                   sample_prior=TRUE,  # needed for hypotheses tests
+                   cores=brms_ncores, control=list(adapt_delta=0.99), iter=4000, seed=413); # iter=4000 needed to deal with ESS too low; adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b1g); mcmc_plot(b1g, type="trace"); mcmc_plot(b1g);
+  brms::hypothesis(b1g, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0", "roughyes:Trillyes = 0", "cfln2 = 0"));
+  hdi(b1g, ci=0.95);
+  b1g <- brms_fit_indices(b1g, indices=c("bayes_R2", "loo", "waic"), moment_match=TRUE); # KFOLD is very slow even if it is suggested
+  (modcmp_glottocode <- brms_compare_models(b1, b1g, "[+ (1 | glottocode)]", "[- (1 | glottocode)]", bayes_factor=brms_bayes_factors)); # here (...|glottocode) is much better, so we need to keep it! 
+  # saveRDS(b1g, file="~/Temp/b1g_2.RData", compress="xz"); # takes a long time to do it and we manually simplify from it, so make a safe copy in case all crashes so we can continue...
+  # b1g <- readRDS("~/Temp/b1g_2.RData");
+
+  # model comparison with the null model:
+  b0_priors <- c(
+    brms::set_prior("normal(0,3)", class = "Intercept"),
+    brms::set_prior("exponential(4)", class = "sd")
+  ); # for the null model
+  b0 <- brms::brm(r ~ 1 + # the relevant predictors
+                    (1 | gr(phylo, cov=A)) + 
+                    (1 | glottocode) + # the "world" tree allowing multiple observations per language as per https://rdrr.io/cran/brms/f/vignettes/brms_phylogenetics.Rmd
+                    (1 | Area), # area as random effect
+                  data=d, data2=list(A=A),
+                  prior=b0_priors,
+                  family=bernoulli(link="logit"),
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), seed=314); # adapt_delta=0.99 needed to deal with divergent transition(s)
+  summary(b0); 
+  mcmc_plot(b0, type="trace"); 
+  mcmc_plot(b0);
+  b0 <- brms_fit_indices(b0, indices=c("bayes_R2", "loo", "waic"), moment_match=TRUE);
+  (modcmp_0_full <- brms_compare_models(b0, m_full, "[null]", "[full]", bayes_factor=brms_bayes_factors)); # full is much better than the null
+  # saveRDS(b0, file="~/Temp/b0_2.RData", compress="xz"); # takes a long time to do it and we manually simplify from it, so make a safe copy in case all crashes so we can continue...
+  # b0 <- readRDS("~/Temp/b0_2.RData");
+  
+  # let's see if the interaction matters:
+  set.seed(314); # for replicability
+  b2 <- brms::brm(r ~ 1 + rough + Trill + cfln2 + # the relevant predictors
+                    (1 + rough + Trill + cfln2 | gr(phylo, cov=A)) + 
+                    (1 + rough + Trill + cfln2 | glottocode) + # the "world" tree allowing multiple observations per language as per https://rdrr.io/cran/brms/f/vignettes/brms_phylogenetics.Rmd
+                    (1 + rough + Trill + cfln2 | Area), # area as random effect
+                  data=d, data2=list(A=A),
+                  prior=b1_priors,
+                  family=bernoulli(link="logit"),
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), iter=6000, seed=413); # adapt_delta=0.99 needed to deal with divergent transition(s); iter=6000 needed to deal with ESS too low
+  summary(b2); mcmc_plot(b2, type="trace"); mcmc_plot(b2);
+  (hyps_noint <- brms::hypothesis(b2, c("roughyes = 0", "roughyes > 0", "Trillyes = 0", "Trillyes > 0", "cfln2 = 0")));
+  (hdi95_noint <- hdi(b2, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_noint <- "./figures/phylo_noint2";
+  mcmc_plot(b2, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b2); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b2, type="pred", terms=c("rough", "Trill")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_noint <- capture.output(summary(b2));
+  probs_text_noint <- capture.output(probs_noint <- logistic_summary(b2, dat=d, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b2, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b2, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b2, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b2, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  b2 <- brms_fit_indices(b2, indices=c("bayes_R2", "loo", "waic"), moment_match=TRUE);
+  m_noint <- b2;
+  (modcmp_noint_0    <- brms_compare_models(m_noint, b0,     "[noint]", "[null]", bayes_factor=brms_bayes_factors)); # noint is much better than the null
+  (modcmp_noint_full <- brms_compare_models(m_noint, m_full, "[noint]", "[full]", bayes_factor=brms_bayes_factors)); # they are equivalent
+  # saveRDS(b2, file="~/Temp/b2_2.RData", compress="xz"); # takes a long time to do it and we manually simplify from it, so make a safe copy in case all crashes so we can continue...
+  # m_noint <- b2 <- readRDS("~/Temp/b2_2.RData");
+
+  # check if Trill is needed at all (because it seems it might not):
+  set.seed(314); # for replicability
+  b3 <- brms::brm(r ~ 1 + rough + cfln2 + # the relevant predictors
+                    (1 + rough + cfln2 | gr(phylo, cov=A)) + 
+                    (1 + rough + cfln2 | glottocode) + # the "world" tree allowing multiple observations per language as per https://rdrr.io/cran/brms/f/vignettes/brms_phylogenetics.Rmd
+                    (1 + rough + cfln2 | Area), # area as random effect
+                  data=d, data2=list(A=A),
+                  prior=b1_priors,
+                  family=bernoulli(link="logit"),
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), iter=6000, seed=413); # adapt_delta=0.99 needed to deal with divergent transition(s); iter=6000 needed to deal with ESS too low
+  summary(b3); mcmc_plot(b3, type="trace"); mcmc_plot(b3);
+  (hyps_notrill <- brms::hypothesis(b3, c("roughyes = 0", "roughyes > 0", "cfln2 = 0", "cfln2 > 0")));
+  (hdi95_notrill <- hdi(b3, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_notrill <- "./figures/phylo_notrill2";
+  mcmc_plot(b3, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b3); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b3, type="pred", terms=c("rough")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_notrill <- capture.output(summary(b3));
+  probs_text_notrill <- capture.output(probs_notrill <- logistic_summary(b3, dat=data_full_revised_allmeanings_ie_length, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b3, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b3, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b3, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b3, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  b3 <- brms_fit_indices(b3, indices=c("bayes_R2", "loo", "waic"), moment_match=TRUE);
+  m_notrill <- b3;
+  # model comparisons
+  (modcmp_0_notrill     <- brms_compare_models(b0,      m_notrill, "[null]",  "[notrill]", bayes_factor=brms_bayes_factors)); # notrill is much better than null
+  (modcmp_full_notrill  <- brms_compare_models(m_full,  m_notrill, "[full]",  "[notrill]", bayes_factor=brms_bayes_factors)); # notrill possibly better than full
+  (modcmp_noint_notrill <- brms_compare_models(m_noint, m_notrill, "[noint]", "[notrill]", bayes_factor=brms_bayes_factors)); # notrill is better than noint
+  # saveRDS(b3, file="~/Temp/b3_2.RData", compress="xz"); # takes a long time to do it and we manually simplify from it, so make a safe copy in case all crashes so we can continue...
+  # m_notrill <- b3 <- readRDS("~/Temp/b3_2.RData");
+  # -> so, Trill is not needed...
+
+  # check if cfln2 is needed:
+  set.seed(314); # for replicability
+  b4 <- brms::brm(r ~ 1 + rough + # the relevant predictors
+                    (1 + rough | gr(phylo, cov=A)) + 
+                    (1 + rough | glottocode) + # the "world" tree allowing multiple observations per language as per https://rdrr.io/cran/brms/f/vignettes/brms_phylogenetics.Rmd
+                    (1 + rough | Area), # area as random effect
+                  data=d, data2=list(A=A),
+                  prior=b1_priors,
+                  family=bernoulli(link="logit"),
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, control=list(adapt_delta=0.99), iter=6000, seed=413); # adapt_delta=0.99 needed to deal with divergent transition(s); iter=6000 needed to deal with ESS too low
+  summary(b4); mcmc_plot(b4, type="trace"); mcmc_plot(b4);
+  (hyps_nocfl2 <- brms::hypothesis(b4, c("roughyes = 0", "roughyes > 0")));
+  (hdi95_nocfl2 <- hdi(b4, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_nocfl2 <- "./figures/phylo_nocfl22";
+  mcmc_plot(b4, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b4); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b4, type="pred", terms=c("rough")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_nocfl2 <- capture.output(summary(b4));
+  probs_text_nocfl2 <- capture.output(probs_nocfl2 <- logistic_summary(b4, dat=data_full_revised_allmeanings_ie_length, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b4, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b4, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b4, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b4, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  b4 <- brms_fit_indices(b4, indices=c("bayes_R2", "loo", "waic"), moment_match=TRUE);
+  m_nocfl2 <- b4;
+  # model comparisons
+  (modcmp_0_nocfl2       <- brms_compare_models(b0,        m_nocfl2, "[null]",    "[nocfl2]", bayes_factor=brms_bayes_factors)); # much better than null
+  (modcmp_full_nocfl2    <- brms_compare_models(m_full,    m_nocfl2, "[full]",    "[nocfl2]", bayes_factor=brms_bayes_factors)); # nocfl2 is worse than full
+  (modcmp_noint_nocfl2   <- brms_compare_models(m_noint,   m_nocfl2, "[noint]",   "[nocfl2]", bayes_factor=brms_bayes_factors)); # nocfl2 is worse than noint
+  (modcmp_notrill_nocfl2 <- brms_compare_models(m_notrill, m_nocfl2, "[notrill]", "[nocfl2]", bayes_factor=brms_bayes_factors)); # nocfl2 is worse than notrill
+  # saveRDS(b4, file="~/Temp/b4_2.RData", compress="xz"); # takes a long time to do it and we manually simplify from it, so make a safe copy in case all crashes so we can continue...
+  # m_nocfl2 <- b4 <- readRDS("~/Temp/b4_2.RData");
+  # -> cfln2 is needed after all...
+
+  # check again if (1 | glottocode) is really needed:
+  set.seed(314); # for replicability
+  b4g <- brms::brm(r ~ 1 + rough + # the relevant predictors
+                     (1 + rough | gr(phylo, cov=A)) + 
+                     (1 + rough | Area), # area as random effect
+                   data=d, data2=list(A=A),
+                   prior=b1_priors,
+                   family=bernoulli(link="logit"),
+                   save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                   sample_prior=TRUE,  # needed for hypotheses tests
+                   cores=brms_ncores, control=list(adapt_delta=0.99), iter=6000, seed=413); # adapt_delta=0.99 needed to deal with divergent transition(s); iter=6000 needed to deal with ESS too low
+  summary(b4g); mcmc_plot(b4g, type="trace"); mcmc_plot(b4g);
+  brms::hypothesis(b4g, c("roughyes = 0", "roughyes > 0"));
+  hdi(b4g, ci=0.95);
+  b4g <- brms_fit_indices(b4g, indices=c("bayes_R2", "loo", "waic"), moment_match=TRUE);
+  # model comparisons
+  brms_compare_models(b4, b4g, "[+(1|glottocode)]", "[-(1|glottocode)]", bayes_factor=brms_bayes_factors); # +(1|glottocode) still better than -(1|glottocode)
+
+  
+  ## Replace (... | Area) by a 2D Gaussian process:
+  set.seed(314); # for replicability
+  b5 <- brms::brm(r ~ 1 + rough + cfln2 + # the relevant predictors
+                    (1 + rough + cfln2 | gr(phylo, cov=A)) + 
+                    (1 + rough + cfln2 | glottocode) + # the "world" tree allowing multiple observations per language as per https://rdrr.io/cran/brms/f/vignettes/brms_phylogenetics.Rmd
+                    gp(longitude_r, latitude_r, by=Area, gr=TRUE, scale=FALSE), # 2DGP by Area
+                  data=d, data2=list(A=A),
+                  prior=b1_priors,
+                  family=bernoulli(link="logit"),
+                  save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                  sample_prior=TRUE,  # needed for hypotheses tests
+                  cores=brms_ncores, iter=6000, control=list(adapt_delta=0.99), seed=413); # iter=6000 needed to deal with ESS too low); adapt_delta=0.99 to deal with divergent transition(s)
+  summary(b5); mcmc_plot(b5, type="trace"); mcmc_plot(b5);
+  (hyps_gp <- brms::hypothesis(b5, c("roughyes = 0", "roughyes > 0", "cfln2 = 0", "cfln2 > 0")));
+  (hdi95_gp <- hdi(b5, ci=0.95));
+  # posterior predictive checks
+  plot_prefix <- plot_prefix_gp <- "./figures/phylo_gp2";
+  mcmc_plot(b5, type="trace"); ggsave(paste0(plot_prefix,"_mcmctrace.jpg"), device="jpeg", width=7, height=6, units="in", quality=85);
+  mcmc_plot(b5); ggsave(paste0(plot_prefix,"_mcmcestim.jpg"), device="jpeg", width=7, height=4, units="in", quality=85);
+  plot_model(b5, type="pred", terms=c("rough")); ggsave(paste0(plot_prefix,"_pred.jpg"), device="jpeg", width=4, height=4, units="in", quality=85);
+  summary_mod_gp <- capture.output(summary(b5));
+  probs_text_gp <- capture.output(probs_gp <- logistic_summary(b5, dat=data_full_revised_allmeanings_ie_length, outcome="/r/", roughpred="rough", true_val="yes", pp_over_zero=TRUE));
+  pp_check(b5, ndraws=100) + xlab('p(r)') + ggtitle('Posterior predictive density overlay'); ggsave(paste0(plot_prefix,"_ppcheck_densoverlay.jpg"), device="jpeg", width=6, height=4, units="in", quality=85);
+  g <- arrangeGrob(pp_check(b5, type='stat', sta ='min') + xlab('p(r)') + ggtitle('Posterior predictive distribution of minimum values'),
+                   pp_check(b5, type='stat', stat='mean') + xlab('p(r)') + ggtitle('Posterior predictive distribution of means'),
+                   pp_check(b5, type='stat', stat='max') + xlab('p(r)') + ggtitle('Posterior predictive distribution of maximum values'),
+                   ncol=1); # seems fine (the observed, y, does fall in the predicted distributions, y_{rep} for the max, mean and min)
+  as_ggplot(g); ggsave(paste0(plot_prefix,"_ppcheck_min_mean_max.jpg"), plot=g, device="jpeg", width=6, height=4*3, units="in", quality=85);
+  b5 <- brms_fit_indices(b5, indices=c("bayes_R2", "loo", "waic"), moment_match=TRUE);
+  m_gp <- b5;
+  # model comparisons
+  (modcmp_0_gp       <- brms_compare_models(b0,        m_gp, "[null]",    "[gp]", bayes_factor=brms_bayes_factors)); # much better than null
+  (modcmp_notrill_gp <- brms_compare_models(m_notrill, m_gp, "[notrill]", "[gp]", bayes_factor=brms_bayes_factors)); # equivalent
+  # saveRDS(b5, file="~/Temp/b5_2.RData", compress="xz"); # takes a long time to do it and we manually simplify from it, so make a safe copy in case all crashes so we can continue...
+  # m_gp <- b5 <- readRDS("~/Temp/b5_2.RData");
+  # -> 2DGP is essentially identical to using Areas as random effects
+
+  # So, the best model is notrill: 
+  m_best <- m_notrill;
+
+  # Given that the best model seems to be the one with rough + cfln2, let's see if this is not really a mediation model rough -> cfln2 -> r:
+  set.seed(314); # for replicability
+  bmed_rough_len_r__wt_priors <- c(
+    # shared:
+    brms::set_prior("lkj(2)", class = "cor"),
+
+    # r (bernoulli) -- use the MGN priors:
+    brms::set_prior("normal(0,3)", class = "b", resp = "r"),
+    brms::set_prior("normal(0,3)", class = "Intercept", resp = "r"),
+    brms::set_prior("exponential(4)", class = "sd", resp = "r"),
+    
+    # cfln2 (poisson) -- the same as above:
+    brms::set_prior("normal(0, 0.5)", class = "b", resp = "cfln2"),
+    brms::set_prior("normal(0, 0.5)", class = "Intercept", resp = "cfln2"),
+    brms::set_prior("normal(0, 0.5)", class = "sd", resp = "cfln2")
+  );
+  bmed_rough_len_r__wt <- brm(bf(r ~ 1 + rough + cfln2 + # the relevant predictors
+                                   (1 + rough + cfln2 | gr(phylo, cov=A)) + 
+                                   (1 + rough + cfln2 | glottocode) + # the "world" tree allowing multiple observations per language as per https://rdrr.io/cran/brms/f/vignettes/brms_phylogenetics.Rmd
+                                   (1 + rough + cfln2 | Area),
+                                 family=bernoulli(link="logit")) + # outcome
+                                bf(cfln2 ~ 1 + rough + 
+                                     (1 + rough | gr(phylo, cov=A)) + 
+                                     (1 + rough | glottocode) + # the "world" tree allowing multiple observations per language as per https://rdrr.io/cran/brms/f/vignettes/brms_phylogenetics.Rmd
+                                     (1 + rough | Area), 
+                                   family="poisson") + # mediator
+                                set_rescor(FALSE),
+                              data=d, data2=list(A=A),
+                              prior=bmed_rough_len_r__wt_priors,
+                              save_pars=save_pars(all=TRUE), # needed for Bayes factors and moment matching in loo
+                              sample_prior=TRUE,  # needed for hypotheses tests
+                              cores=brms_ncores, control=list(adapt_delta = 0.99), iter=6000, seed=314); # adapt_delta = 0.99 needed to deal with divergent transition(s); iter=6000 needed to deal with ESS too low)
+  summary(bmed_rough_len_r__wt); 
+  mcmc_plot(bmed_rough_len_r__wt, type="trace"); 
+  mcmc_plot(bmed_rough_len_r__wt);
+  (bmed_rough_len_r__wt_mediation <- bayestestR::mediation(bmed_rough_len_r__wt)); # no mediated nor direct effect
+  summary_mediation <- capture.output(summary(bmed_rough_len_r__wt));
+  # saveRDS(bmed_rough_len_r__wt, file="~/Temp/bmed_rough_len_r__wt_2.RData", compress="xz"); # takes a long time to do it and we manually simplify from it, so make a safe copy in case all crashes so we can continue...
+  # bmed_rough_len_r__wt <- readRDS("~/Temp/bmed_rough_len_r__wt_2.RData");
+  
+  
+  # Save these results:
+  worldtree_betal22 <- list(
+    data=d,
+    tree=tree,
+    n_lgs_kept=n_lgs_to_keep, n_lgs_lost=n_lgs_lost,
+    "full"=list("model"=NULL, #m_full, # needed for later comparisons
+                "summary"=summary_mod_full, "hypotheses"=hyps_full, "hdi95"=hdi95_full, 
+                "cmp_to_null"=modcmp_0_full, "probs"=probs_full, "probs_text"=probs_text_full, "plot_prefix"=plot_prefix_full),
+    "cmp_glottocode"=modcmp_glottocode,
+    "noint"=list("model"=NULL, #m_noint, # needed for later comparisons
+                 "summary"=summary_mod_noint, "hypotheses"=hyps_noint, "hdi95"=hdi95_noint, 
+                 "cmp_to_null"=modcmp_noint_0,  "cmp_to_full"=modcmp_noint_full, "probs"=probs_noint, "probs_text"=probs_text_noint, "plot_prefix"=plot_prefix_noint),
+    "notrill"=list("model"=NULL, #m_notrill, # needed for later comparisons
+                   "summary"=summary_mod_notrill, "hypotheses"=hyps_notrill, "hdi95"=hdi95_notrill, 
+                   "cmp_to_null"=modcmp_0_notrill,  "cmp_to_full"=modcmp_full_notrill, "cmp_to_noint"=modcmp_noint_notrill, 
+                   "probs"=probs_notrill, "probs_text"=probs_text_notrill, "plot_prefix"=plot_prefix_notrill),
+    "nocfl2"=list("model"=NULL, #m_nocfl2, # needed for later comparisons
+                  "summary"=summary_mod_nocfl2, "hypotheses"=hyps_nocfl2, "hdi95"=hdi95_nocfl2, 
+                  "cmp_to_null"=modcmp_0_nocfl2,  "cmp_to_full"=modcmp_full_nocfl2, "cmp_to_noint"=modcmp_noint_nocfl2, "cmp_to_notrill"=modcmp_notrill_nocfl2,  
+                  "probs"=probs_nocfl2, "probs_text"=probs_text_nocfl2, "plot_prefix"=plot_prefix_nocfl2),
+    "gp"=list("model"=NULL, #m_gp, # needed for later comparisons
+                  "summary"=summary_mod_gp, "hypotheses"=hyps_gp, "hdi95"=hdi95_gp, 
+                  "cmp_to_notrill"=modcmp_notrill_gp),
+    "best"="notrill",
+    "mediation"=list("summary"=summary_mediation, "mediation"=bmed_rough_len_r__wt_mediation)
+  );
+  save(worldtree_betal22, file=file_name, compress="xz", compression_level=9);
+} else
+{
+  load(file_name);
+} 
+
+## ----results='markup'---------------------------------------------------------
+worldtree_betal22$notrill$hypotheses;
+
+## -----------------------------------------------------------------------------
+cat(worldtree_betal22$notrill$summary, sep="\n");
+worldtree_betal22$notrill$hypotheses;
+
+## -----------------------------------------------------------------------------
+cat(worldtree_betal22$gp$summary, sep="\n");
+worldtree_betal22$gp$hypotheses;
+
+## ----warning=FALSE, results='asis'--------------------------------------------
+if( require(benchmarkme) )
+{
+  # CPU:
+  cpu_info <- benchmarkme::get_cpu();
+  if( is.null(cpu_info) )
+  {
+    cat("**CPU:** unknown.\n\n");
+  } else
+  {
+    if( !is.null(cpu_info$model_name) && !is.na(cpu_info$model_name) )
+    {
+      cat(paste0("**CPU:** ",cpu_info$model_name));
+      if( !is.null(cpu_info$no_of_cores) && !is.na(cpu_info$no_of_cores) )
+      {
+        cat(paste0(" (",cpu_info$no_of_cores," threads)"));
+      }
+      cat("\n\n");
+    } else
+    {
+      cat("**CPU:** unknown.\n\n");
+    }
+  }
+  
+  # RAM:
+  ram_info <- benchmarkme::get_ram();
+  if( is.null(ram_info) || is.na(ram_info) )
+  {
+    cat("**RAM (memory):** unknown.\n\n");
+  } else
+  {
+    cat("**RAM (memory):** "); print(ram_info); cat("\n");
+  }
+} else
+{
+  cat("**RAM (memory):** cannot get info (try installing package 'benchmarkme').\n\n");
+}
+
+## ----warning=FALSE, results='asis'--------------------------------------------
+if( require(distro) && !is.null(distro_info <- distro()) )
+{
+  cat(paste0("**Linux distribution**: ", distro_info$id, " ", distro_info$version, "\n"));
+}
+pander::pander(sessionInfo());
+

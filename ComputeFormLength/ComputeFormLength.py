@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
 '''
 Created on May 3 2023
-Last modified on May 4 2023
-@author: Francois Pellegrino - CNRS
+Last modified on Nov 19 2024
+@author: Francois Pellegrino - CNRS (May 2023)
+@modified: Dan Dediu (Nov 2024):
+  - process the rough_r_data_IE_fixed.csv file which also contains the Form_norm that fixes various UTF8 encoding issues
+  - fix Python 3.12 SyntaxWarning: invalid escape sequence in re.sub()
 Script Name: ComputeformLength
 
 DESCRIPTION: Add two columns to the rough_r_data.csv dataset:
@@ -34,7 +37,7 @@ import seaborn as sns
 from tqdm import tqdm
 import unicodedata
 
-f_in = "../data/rough_r_data_IE.csv"
+f_in = "../data/rough_r_data_IE_fixed.csv"
 f_out = "../data/rough_r_data_IE_length.csv"
 
 def formlength(text):
@@ -77,9 +80,9 @@ def clean_form(form):
     # Remove also tones or secondary articulations marked in superscript
     clean = re.sub(r"[⁰¹²³⁴⁵⁶⁷⁸⁹ʰʲʸʷⁿˀˤᵐ]", "", clean)
     # Simplify duplicate characters (long vowels or geminates mostly)
-    clean = re.sub(r"(.)\1", "\g<1>", clean)
+    clean = re.sub(r"(.)\1", "\\g<1>", clean)
     # Finally, space characters are removed
-    clean = re.sub("[\s]+", "", clean)
+    clean = re.sub("[\\s]+", "", clean)
     return clean, formlength(clean)
 
 def main():
@@ -88,6 +91,7 @@ def main():
    df = pd.read_csv(f_in, encoding="utf8", sep=",", na_filter=False, index_col=False)
    # Process dataset
    df[["CleanForm", "CleanFormLength"]] = df.progress_apply(lambda x: pd.Series(clean_form(str(x["Form"]))), axis=1)
+   df[["CleanFormNorm", "CleanFormNormLength"]] = df.progress_apply(lambda x: pd.Series(clean_form(str(x["Form_norm"]))), axis=1)
    # Save dataset
    df.to_csv(f_out, sep=',', mode='w', encoding='utf8', index=False, float_format='%.4f')
 

@@ -9,13 +9,13 @@ The structure of the repository is as follows:
 + bibliography.bib: the used references in bib format
 + apa-6th-edition.csl: the APA style used for references
 + IE_recoding_adapted.Rmd and IE_recoding_adapted.html: the Rmarkdown script (and its output) detailing the recoding decisions for each language (please note that this document used mixed English and French languages, but should be understandable even to monolingual English speakers)
-+ rrrugosity_revisited.Rmd and rrrugosity_revisited.html: the Rmarkdown script (and its output) containing the analyses reported in the paper
++ rrrugosity_revisited.Rmd, rrrugosity_revisited.R and rrrugosity_revisited.html: the Rmarkdown script (and the extracted pure R code, and its output) containing the analyses reported in the paper
 + data: folder containing various data needed by the rrrugosity_revisited.Rmd script 
   + glottolog: contanins some data downloaded from the Glottolog website
   + phylogenies: contains the two "world" phylogenies from Jäger (2018) and from Bouckaert et al. (2022)
   + rough_r_data_IE.csv, rough_r_data_IE_length.csv and rough_r_data.csv: the recoded data with and without IE languages and with and without form length
 + ComputeFormLength: Python script for the computation of the (rough) form length
 + from_winter2022: various pieces of data and code from the original Winter et al. (2022) paper
-+ cached, figures and models: various pre-computed models and figures to speed-up the Rmarkdon compilation process (they can be regenerated if needed using the code in the script but this is quite computationally expensive)
++ cached and models: various pre-computed models to speed-up the Rmarkdon compilation process (they can be regenerated if needed using the code in the script but this is quite computationally expensive)
   
- 
+ This has been updated following feedback from Matías Guzmán Naranjo.
