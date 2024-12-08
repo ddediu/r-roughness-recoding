@@ -40,6 +40,9 @@ if( !dir.exists("./cached") ) dir.create("./cached", showWarnings=FALSE, recursi
 small_HTML <- FALSE;
 small_PDF <- TRUE;
 
+# Is this a supplementary materials document?
+supplementary_materials <- TRUE; # yes, it is, so make sure the figures and tables are marked as such
+
 ## For Bayesian regressions with brms (some might be different for particular models to avoid too few or too many iterations):
 brms_ncores  <- max(detectCores(all.tests=TRUE, logical=FALSE), 4, na.rm=TRUE); # try to use multiple cores, if present
 brms_ci      <- 0.89; brms_rope <- c(-0.01, 0.01); # 89% HDI and a tight ROPE around 0.0 [-0.01, 0.01]
@@ -52,16 +55,16 @@ outputFormat = opts_knit$get("rmarkdown.pandoc.to"); # determine the output form
 if( is.null(outputFormat) ) outputFormat = ""; # probably not run within knittr
 capTabNo = 1; capFigNo = 1; # figure and table caption numbering, for HTML do it manually
 #Function to add the Table Number
-capTab = function(x){
+capTab = function(x, suppmats=supplementary_materials){
   if(outputFormat == 'html'){
-    x = paste0("***Table ",capTabNo,".*** _",x,"_")
+    x = paste0("***",ifelse(!suppmats,"Table ","Supplementary table "),capTabNo,".*** _",x,"_")
     capTabNo <<- capTabNo + 1
   }; x
 }
 #Function to add the Figure Number
-capFig = function(x){
+capFig = function(x, suppmats=supplementary_materials){
   if(outputFormat == 'html'){
-    x = paste0("***Figure ",capFigNo,".*** _",x,"_")
+    x = paste0("***",ifelse(!suppmats,"Figure ","Supplementary figure "),capFigNo,".*** _",x,"_")
     capFigNo <<- capFigNo + 1
   }; x
 }
